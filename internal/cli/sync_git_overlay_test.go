@@ -1625,7 +1625,7 @@ func assertGitOverlaySnapshotFingerprint(t *testing.T, repo Repo, cfg Config, ex
 }
 
 func TestFinalizeGitOverlaySnapshotCleanupPreservesPrimaryFailure(t *testing.T) {
-	primary := exit(17, "primary transfer failure")
+	primary := Exit(17, "primary transfer failure")
 	cleanupErr := errors.New("cleanup failure")
 	var runErr error = primary
 	var runFailure error = primary
@@ -1715,7 +1715,7 @@ func TestTerminalGitOverlaySnapshotCleanupClosesHandlesAndPreservesPrimaryFailur
 	}
 	root := snapshot.Root
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	primary := exit(17, "primary transfer failure")
+	primary := Exit(17, "primary transfer failure")
 	cleanupFailure := errors.New("cleanup exhausted")
 	var runErr error = primary
 	var runFailure error = primary
@@ -3563,7 +3563,7 @@ done < "$tmp"
 			if err := os.WriteFile(filepath.Join(binDir, "rsync"), []byte(rsyncScript), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			providerName := runEnvProfileTestProvider{}.Name()
+			providerName := runEnvProfileTestProvider{}.Spec().Name
 			runEnvProfileTestAcquireLease = func(AcquireRequest) (LeaseTarget, error) {
 				return LeaseTarget{Server: Server{Provider: providerName}, SSH: SSHTarget{
 					User: "crabbox", Host: "127.0.0.1", Port: "22", TargetOS: targetLinux, SSHConfigProxy: true,
@@ -4046,7 +4046,7 @@ func TestRunMissingOriginReplacementLeaseStaysPlainManifest(t *testing.T) {
 	}
 	remoteRoot := filepath.Join(testRoot, "remote")
 	var leaseIDs [2]string
-	providerName := runReadyPoolPreflightTestProvider{}.Name()
+	providerName := runReadyPoolPreflightTestProvider{}.Spec().Name
 	var (
 		acquires atomic.Int32
 		receipt  terminalRunReceipt

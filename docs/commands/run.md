@@ -36,7 +36,8 @@ snippets, pipes, or shell expansion.
 
 On Cloudflare Sandbox, Superserve, Crownest, Vercel Sandbox, Nomad, CodeSandbox,
 OpenComputer, Docker Sandbox, Agent Sandbox, SmolVM, Upstash Box, Tensorlake,
-and OpenSandbox,
+OpenSandbox, Blaxel, Cloudflare containers, Azure Dynamic Sessions, Anthropic
+Sandbox Runtime, Daytona, Freestyle, Islo, Modal, Cloud Run Sandbox, and Orgo,
 quoted or interpolated profile arguments retain their literal meaning through
 the delegated command transport. A value such as `&&` does not become a shell
 operator, and an executable named `FOO=x` is invoked rather than treated as an
@@ -63,7 +64,10 @@ and SIGQUIT dispositions, including intentionally ignored signals.
 
 POSIX workspace ownership uses `flock`, BSD `lockf`, or an atomic directory gate
 when neither tool is available. Acquire, renewal, release, and foreground-child
-registration share the same gate. The directory fallback never steals a gate
+registration share the same gate. The directory fallback requires a
+BSD/GNU-compatible `mkdir -v` creation receipt, so a tool that
+incorrectly returns success for an existing directory cannot grant ownership.
+It never steals a gate
 based on elapsed time: an interrupted helper may still have a writer in flight.
 Stop and replace a managed lease if that gate remains ambiguous. Normal owner
 expiry recovery still requires proof that the recorded foreground child exited.
@@ -565,10 +569,23 @@ stays on the remote workdir until you delete it or reset the lease. See
 ## Preflight
 
 `--preflight` prints a target-specific capability snapshot after sync and before
-the remote command. It is diagnostic only: Crabbox does not install tools,
-change the machine, or fail just because a tool is missing. Install logic
+the remote command. It is diagnostic only: Crabbox does not install or upgrade
+host tools, or fail just because a tool is missing. Install logic
 belongs in Actions hydration, a prebaked image, a devcontainer, Nix/mise/asdf,
 or the command/script you run.
+
+The `npm`, `pnpm`, and `yarn` version probes disable Corepack networking,
+latest-version lookup, automatic project pinning, and download prompts for that
+probe only. An uncached Corepack-managed version may therefore be unavailable;
+hydrate it separately. The selected project version and the later workload's
+environment are unchanged. These controls do not make arbitrary executable
+wrappers filesystem-pure or prevent every package manager from touching caches.
+The pnpm probe also sets `PNPM_CONFIG_PM_ON_FAIL=ignore` for that child only:
+pnpm versions supporting `pmOnFail` skip their own secondary version checks and
+environment-lockfile reconciliation, while Corepack still selects the project's
+pinned version. Older Corepack-managed pnpm already skips its own version
+switching; this does not promise to suppress every standalone legacy wrapper's
+self-management. The workload's original pnpm policy is restored.
 
 By default it probes common language and infrastructure tools plus OS-specific
 basics. Run [`crabbox preflight-tools`](preflight-tools.md), or add `--json`, to
@@ -583,6 +600,7 @@ crabbox run --preflight --preflight-tools node,bun,docker -- bun test
 crabbox run --preflight --preflight-tools default,uv -- node --test
 crabbox run --preflight --preflight-tools default,cmake -- cmake --build build
 crabbox run --preflight --preflight-tools python,python3 -- python3 -m pytest
+crabbox run --preflight --preflight-tools default,python3-venv -- python3 -m pytest
 crabbox run --preflight --preflight-tools raw_socket -- ./packet-tests
 crabbox run --preflight --preflight-tools none -- ./smoke.sh
 ```
@@ -599,6 +617,51 @@ probes likewise invoke the literal requested command with `--version`, including
 `python` and `python3` on native Windows; Crabbox does not map either name to
 `py`. An unavailable literal command prints `<name>=missing` and the run
 continues.
+
+`python3-venv` is a separate, opt-in functional probe for Linux, macOS and WSL2;
+native Windows skips it. It creates a fresh disposable virtual environment with
+pip, then invokes that environment's Python and pip. It never selects, activates
+or reuses a project environment, installs project packages, or upgrades host
+Python, `venv`, `ensurepip` or pip. Pip seeding stays inside the disposable
+environment. The literal `python` and `python3` version probes and default list
+remain unchanged; `default,python3-venv,python3-venv` keeps the default order and
+adds one functional result.
+
+The result line is `remote preflight python3-venv=<state> cleanup=<confirmed|unconfirmed>`.
+States are `ready`, `missing-python3`, `venv-unavailable`, `pip-unavailable`,
+`worker-failed`, `timed-out`, `canceled` and `unavailable`. `ready` requires both
+environment-local commands to succeed, owner-confirmed probe-process quiescence
+and scratch removal, and caller-confirmed retirement of the exact transport
+stage. `venv-unavailable` covers missing venv support, environment-creation failure
+or failure of the environment's Python; `pip-unavailable` covers missing or failing
+`ensurepip`, pip seeding or the environment's pip. `unavailable` means no reliable
+capability result. Cleanup is independent: a transport, setup or envelope error
+can remain after confirmed cleanup (`unavailable cleanup=confirmed`); unresolved
+quiescence, scratch removal or stage retirement reports `cleanup=unconfirmed`.
+
+Missing or broken capability is diagnostic only and does not skip the workload.
+Worker failure or probe timeout is also diagnostic only when cleanup is confirmed.
+In contrast, an operational transport, setup, envelope, ownership or cleanup
+failure prevents the next workload, even if cleanup is confirmed. In particular,
+`unavailable cleanup=unconfirmed` never permits continuation with an unresolved
+owned stage.
+Caller cancellation remains cancellation (`canceled`), and no later workload
+starts. An expired caller deadline also reports `canceled` in the preflight line;
+`timed-out` identifies expiration of the functional worker allowance. Operational
+ownership failures report `unavailable`. Saved timing and local history retain
+the caller cancellation or deadline classification, and operational preflight
+failures are not reported as workload `command-exit` errors. The probe has a
+90-second allowance and an independent 30-second cleanup reserve, plus separately
+bounded transport setup; this is not a promise that the whole command finishes
+within 120 seconds. This functional probe cannot be used
+as a profile-doctor version-only tool requirement.
+
+On WSL2, completion and retirement use fixed metadata checks on the selected SSH
+endpoint without creating another staged workload. A private stdin pipe preserves
+the fixed program’s quotes and bytes without passing it as native arguments.
+Each check has a 20-second caller-side cap that cannot extend the shared cleanup deadline. This cap is not
+an independent native WSL watchdog; cleanup still requires verified completion
+and retirement.
 
 `raw_socket` uses `python3`, then `python`, to open and immediately close
 `socket(AF_INET, SOCK_RAW, IPPROTO_RAW)` without binding, connecting, sending,
@@ -827,6 +890,13 @@ Before sync, `run` prints a compact context block with run ID, portal/log URLs,
 lease ID, slug, provider, SSH target, remote workdir, and whether the workspace
 is raw or Actions-hydrated.
 
+When available, an additional image line separates the configured reference,
+runtime image ID, and reported repository digests. The same optional
+`imageEvidence` object is retained in timing JSON and opt-in local history and
+included in `--emit-proof` output. These initial image observations are unsigned;
+they do not change signed receipt or checkpoint identities. See
+[local-container image evidence](../providers/local-container.md#initial-image-evidence).
+
 For newly created brokered leases, `run` also prints the exact selected image
 ID/source and provider-side request, network-readiness, bootstrap, and total
 startup timings when the provider reports them.
@@ -937,6 +1007,15 @@ history item. [`crabbox history`](history.md) lists those records and [`crabbox
 logs <run-id>`](logs.md) prints retained remote output (retention is bounded so
 a noisy command cannot fill storage). See
 [history and logs](../features/history-logs.md).
+
+Use `--record-local` to retain private, bounded local history for this run,
+including coordinator-free and delegated execution. Trusted user configuration
+can enable `history.local.enabled`; an explicit `--record-local=false` disables
+it for one run. Repository policy cannot silently enable this storage. The
+printed run ID works with local history/logs/results after lease cleanup.
+Local history finalization runs after the existing timing/receipt operations;
+failure warns and leaves incomplete metadata without changing their result or
+the original process exit. It never uploads a direct run or creates attestation.
 
 ## Pond
 
@@ -1066,4 +1145,5 @@ Run-specific flags:
 --label <text>
 --timing-json
 --timing-record default|off|path
+--record-local
 ```

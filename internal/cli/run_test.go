@@ -620,10 +620,6 @@ exit 0
 
 type windowsEnvHelperTestProvider struct{}
 
-func (windowsEnvHelperTestProvider) Name() string { return "windows-env-helper-test" }
-func (windowsEnvHelperTestProvider) Aliases() []string {
-	return nil
-}
 func (windowsEnvHelperTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name: "windows-env-helper-test",
@@ -681,10 +677,6 @@ func (b windowsEnvHelperTestBackend) Touch(context.Context, TouchRequest) (Serve
 
 type runEnvProfileTestProvider struct{}
 
-func (runEnvProfileTestProvider) Name() string { return "run-env-profile-test" }
-func (runEnvProfileTestProvider) Aliases() []string {
-	return nil
-}
 func (runEnvProfileTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "run-env-profile-test",
@@ -706,10 +698,6 @@ func (p runEnvProfileTestProvider) Configure(Config, Runtime) (Backend, error) {
 
 type runReadyPoolPreflightTestProvider struct{}
 
-func (runReadyPoolPreflightTestProvider) Name() string { return "run-ready-pool-preflight-test" }
-func (runReadyPoolPreflightTestProvider) Aliases() []string {
-	return nil
-}
 func (runReadyPoolPreflightTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "run-ready-pool-preflight-test",
@@ -822,7 +810,7 @@ func setupRunClaimSnapshotTest(t *testing.T) (LeaseTarget, leaseClaim) {
 		t.Fatal(err)
 	}
 	cfg := baseConfig()
-	cfg.Provider = runEnvProfileTestProvider{}.Name()
+	cfg.Provider = runEnvProfileTestProvider{}.Spec().Name
 	lease := LeaseTarget{
 		LeaseID: "cbx_env_profile_test",
 		Server: Server{
@@ -843,10 +831,10 @@ func setupRunClaimSnapshotTest(t *testing.T) (LeaseTarget, leaseClaim) {
 			SSHConfigProxy: true,
 		},
 	}
-	if err := claimLeaseTargetForRepoConfig(lease.LeaseID, "claim-snapshot", cfg, lease.Server, lease.SSH, repo.Root, cfg.IdleTimeout, false); err != nil {
+	if err := ClaimLeaseTargetForRepoConfig(lease.LeaseID, "claim-snapshot", cfg, lease.Server, lease.SSH, repo.Root, cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
-	initial, err := readLeaseClaim(lease.LeaseID)
+	initial, err := ReadLeaseClaim(lease.LeaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -855,7 +843,7 @@ func setupRunClaimSnapshotTest(t *testing.T) (LeaseTarget, leaseClaim) {
 	t.Cleanup(func() {
 		runEnvProfileTestAcquireLease = nil
 		runEnvProfileTestReleaseRequestHook = nil
-		removeLeaseClaim(lease.LeaseID)
+		RemoveLeaseClaim(lease.LeaseID)
 	})
 	return lease, initial
 }
@@ -871,7 +859,7 @@ func TestRunCommandOneShotCleanupUsesUpdatedClaimSnapshot(t *testing.T) {
 		if claim.Revision == initial.Revision {
 			return errors.New("release received the pre-registration claim snapshot")
 		}
-		return removeLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, claim, func() error {
+		return RemoveLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, claim, func() error {
 			resourceDeleted = true
 			return nil
 		})
@@ -879,7 +867,7 @@ func TestRunCommandOneShotCleanupUsesUpdatedClaimSnapshot(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
-		"--provider", runEnvProfileTestProvider{}.Name(),
+		"--provider", runEnvProfileTestProvider{}.Spec().Name,
 		"--no-sync",
 		"--",
 		"true",
@@ -890,7 +878,7 @@ func TestRunCommandOneShotCleanupUsesUpdatedClaimSnapshot(t *testing.T) {
 	if !resourceDeleted {
 		t.Fatal("task-owned resource was not deleted")
 	}
-	if _, exists, err := readLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
+	if _, exists, err := ReadLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
 		t.Fatalf("claim exists=%v err=%v after successful cleanup", exists, err)
 	}
 }
@@ -904,15 +892,15 @@ func TestWarmupFailureAfterRegistrationReleasesNewestClaimSnapshot(t *testing.T)
 		if !set || !exists || snapshot.Revision == initial.Revision {
 			return fmt.Errorf("release received stale claim snapshot: %#v", snapshot)
 		}
-		return removeLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, snapshot, nil)
+		return RemoveLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, snapshot, nil)
 	}
 	err := (App{Stdout: io.Discard, Stderr: io.Discard}).warmup(context.Background(), []string{
-		"--provider", runEnvProfileTestProvider{}.Name(), "--network", "tailscale",
+		"--provider", runEnvProfileTestProvider{}.Spec().Name, "--network", "tailscale",
 	})
 	if err == nil || !strings.Contains(err.Error(), "no tailnet address") || releases != 1 {
 		t.Fatalf("warmup error=%v releases=%d", err, releases)
 	}
-	if _, exists, err := readLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
+	if _, exists, err := ReadLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
 		t.Fatalf("claim exists=%t err=%v", exists, err)
 	}
 }
@@ -920,12 +908,12 @@ func TestWarmupFailureAfterRegistrationReleasesNewestClaimSnapshot(t *testing.T)
 func TestResolvedRegistrationTouchReceivesNewestClaimSnapshot(t *testing.T) {
 	lease, initial := setupRunClaimSnapshotTest(t)
 	cfg := baseConfig()
-	setProviderSelection(&cfg, runEnvProfileTestProvider{}.Name(), providerSelectionFlag)
+	setProviderSelection(&cfg, runEnvProfileTestProvider{}.Spec().Name, providerSelectionFlag)
 	touches := 0
 	runEnvProfileTestTouchHook = func(req TouchRequest) error {
 		touches++
 		snapshot, exists, set := ServerLeaseClaimSnapshot(req.Lease.Server)
-		current, err := readLeaseClaim(req.Lease.LeaseID)
+		current, err := ReadLeaseClaim(req.Lease.LeaseID)
 		if err != nil || !set || !exists || snapshot.Revision == initial.Revision || !reflect.DeepEqual(snapshot, current) {
 			return fmt.Errorf("touch received stale snapshot: snapshot=%#v current=%#v exists=%t set=%t err=%v", snapshot, current, exists, set, err)
 		}
@@ -951,10 +939,10 @@ func TestRunCommandCleanupRejectsClaimReplacedAfterRegistration(t *testing.T) {
 		}
 		labels := cloneStringMap(claim.Labels)
 		labels["owner"] = "replacement-process"
-		if _, err := updateLeaseClaimLabelsIfUnchanged(req.Lease.LeaseID, claim, labels); err != nil {
+		if _, err := UpdateLeaseClaimLabelsIfUnchanged(req.Lease.LeaseID, claim, labels); err != nil {
 			return err
 		}
-		return removeLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, claim, func() error {
+		return RemoveLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, claim, func() error {
 			resourceDeleted = true
 			return nil
 		})
@@ -962,7 +950,7 @@ func TestRunCommandCleanupRejectsClaimReplacedAfterRegistration(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
-		"--provider", runEnvProfileTestProvider{}.Name(),
+		"--provider", runEnvProfileTestProvider{}.Spec().Name,
 		"--no-sync",
 		"--",
 		"true",
@@ -973,7 +961,7 @@ func TestRunCommandCleanupRejectsClaimReplacedAfterRegistration(t *testing.T) {
 	if resourceDeleted {
 		t.Fatal("replacement-owned resource was deleted")
 	}
-	replacement, readErr := readLeaseClaim(lease.LeaseID)
+	replacement, readErr := ReadLeaseClaim(lease.LeaseID)
 	if readErr != nil || replacement.Labels["owner"] != "replacement-process" {
 		t.Fatalf("replacement claim=%#v err=%v", replacement, readErr)
 	}
@@ -1004,10 +992,6 @@ type runWorkdirCase struct {
 
 type runArchiveSyncPreflightTestProvider struct{}
 
-func (runArchiveSyncPreflightTestProvider) Name() string { return "run-archive-sync-preflight-test" }
-func (runArchiveSyncPreflightTestProvider) Aliases() []string {
-	return nil
-}
 func (runArchiveSyncPreflightTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "run-archive-sync-preflight-test",
@@ -1081,7 +1065,7 @@ func setupDelegatedArchiveSyncPreflightWorkspace(t *testing.T, colocatedGit, inv
 }
 
 func TestRunDelegatedArchiveSyncValidatesSourceBeforeProviderCall(t *testing.T) {
-	provider := runArchiveSyncPreflightTestProvider{}.Name()
+	provider := runArchiveSyncPreflightTestProvider{}.Spec().Name
 
 	t.Run("native Jujutsu", func(t *testing.T) {
 		root := setupDelegatedArchiveSyncPreflightWorkspace(t, false, false)
@@ -1206,7 +1190,7 @@ func TestRunOrdinarySparseScopeBeforeLeaseWork(t *testing.T) {
 				acquires := 0
 				runEnvProfileTestAcquireLease = func(AcquireRequest) (LeaseTarget, error) {
 					acquires++
-					return LeaseTarget{}, exit(9, "acquire captured")
+					return LeaseTarget{}, Exit(9, "acquire captured")
 				}
 				t.Cleanup(func() { runEnvProfileTestAcquireLease = nil })
 				runPrepareTestResolveRequests = nil
@@ -1412,10 +1396,6 @@ func TestRunBuildsSyncManifestAfterAcquire(t *testing.T) {
 
 type runPrepareTestProvider struct{}
 
-func (runPrepareTestProvider) Name() string { return "run-prepare-test" }
-func (runPrepareTestProvider) Aliases() []string {
-	return nil
-}
 func (runPrepareTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "run-prepare-test",
@@ -1443,11 +1423,11 @@ var runPrepareTestResolveRequests []ResolveRequest
 
 func (b runPrepareTestBackend) Spec() ProviderSpec { return b.spec }
 func (b runPrepareTestBackend) Acquire(context.Context, AcquireRequest) (LeaseTarget, error) {
-	return LeaseTarget{}, exit(9, "unexpected acquire")
+	return LeaseTarget{}, Exit(9, "unexpected acquire")
 }
 func (b runPrepareTestBackend) Resolve(_ context.Context, req ResolveRequest) (LeaseTarget, error) {
 	runPrepareTestResolveRequests = append(runPrepareTestResolveRequests, req)
-	return LeaseTarget{}, exit(9, "resolve captured")
+	return LeaseTarget{}, Exit(9, "resolve captured")
 }
 func (b runPrepareTestBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
 	return nil, nil
@@ -1461,10 +1441,6 @@ func (b runPrepareTestBackend) Touch(context.Context, TouchRequest) (Server, err
 
 type runModuleRuntimeTestProvider struct{}
 
-func (runModuleRuntimeTestProvider) Name() string { return "module-runtime-test" }
-func (runModuleRuntimeTestProvider) Aliases() []string {
-	return nil
-}
 func (runModuleRuntimeTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "module-runtime-test",
@@ -1480,12 +1456,13 @@ func (runModuleRuntimeTestProvider) RegisterFlags(*flag.FlagSet, Config) any {
 func (runModuleRuntimeTestProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
-func (p runModuleRuntimeTestProvider) Configure(Config, Runtime) (Backend, error) {
-	return runModuleRuntimeTestBackend{spec: p.Spec()}, nil
+func (p runModuleRuntimeTestProvider) Configure(_ Config, rt Runtime) (Backend, error) {
+	return runModuleRuntimeTestBackend{spec: p.Spec(), rt: rt}, nil
 }
 
 type runModuleRuntimeTestBackend struct {
 	spec ProviderSpec
+	rt   Runtime
 }
 
 var runModuleRuntimeTestRequests []RunRequest
@@ -1511,6 +1488,13 @@ func (b runModuleRuntimeTestBackend) Warmup(context.Context, WarmupRequest) erro
 }
 func (b runModuleRuntimeTestBackend) Run(_ context.Context, req RunRequest) (RunResult, error) {
 	runModuleRuntimeTestRequests = append(runModuleRuntimeTestRequests, req)
+	if req.Observation != nil {
+		fmt.Fprintln(b.rt.Stderr, "fixture provider planning")
+		req.Observation.Phase(RunPhaseCommand)
+		stdout, stderr := req.Observation.CommandWriters(b.rt.Stdout, b.rt.Stderr, RunOutputProvider)
+		fmt.Fprintln(stdout, "fixture command stdout")
+		fmt.Fprintln(stderr, "fixture command stderr")
+	}
 	return RunResult{Provider: b.spec.Name, LeaseID: "mod_test", Slug: "module-runtime-test"}, nil
 }
 func (b runModuleRuntimeTestBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
@@ -1609,7 +1593,7 @@ func TestRunWithExistingLeaseRoutesProviderFromClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	const leaseID = "cbx_1257abcdefff"
-	if err := claimLeaseForRepoProvider(leaseID, "claim-routed", "run-prepare-test", repo.Root, time.Minute, false); err != nil {
+	if err := ClaimLeaseForRepoProvider(leaseID, "claim-routed", "run-prepare-test", repo.Root, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1692,8 +1676,8 @@ func TestFormatRunSummaryNoSync(t *testing.T) {
 }
 
 func TestShouldReplaceLeaseAfterBeforeCommandSSHFailure(t *testing.T) {
-	waitErr := exit(5, "timed out waiting for SSH on 203.0.113.10 during before command")
-	otherErr := exit(6, "rsync failed")
+	waitErr := Exit(5, "timed out waiting for SSH on 203.0.113.10 during before command")
+	otherErr := Exit(6, "rsync failed")
 	tests := []struct {
 		name            string
 		err             error
@@ -2002,7 +1986,7 @@ func setupLocalContainerRunSessionTest(t *testing.T, commandScript string) (stri
 		runEnvProfileTestReleaseRequestHook = nil
 		runEnvProfileTestTouchHook = nil
 		runEnvProfileTestReleaseErr = nil
-		removeLeaseClaim(localContainerRunSessionTestLeaseID)
+		RemoveLeaseClaim(localContainerRunSessionTestLeaseID)
 	})
 	return dir, lease
 }
@@ -2059,7 +2043,7 @@ func TestRunCommandWritesFreshLocalContainerLeaseOutputAfterClaim(t *testing.T) 
 	}
 	touchObserved := false
 	runEnvProfileTestTouchHook = func(req TouchRequest) error {
-		if _, exists, err := readLeaseClaimWithPresence(req.Lease.LeaseID); err != nil || !exists {
+		if _, exists, err := ReadLeaseClaimWithPresence(req.Lease.LeaseID); err != nil || !exists {
 			return fmt.Errorf("touch observed before exact claim: exists=%t err=%v", exists, err)
 		}
 		if _, err := os.Stat(path); err != nil {
@@ -2278,7 +2262,7 @@ exit 0
 			testAWSBackendOverride = testSSHBackend{spec: testAWSProvider{}.Spec()}
 			t.Cleanup(func() {
 				testAWSBackendOverride = nil
-				removeLeaseClaim(leaseID)
+				RemoveLeaseClaim(leaseID)
 			})
 
 			var stdout, stderr bytes.Buffer
@@ -2411,7 +2395,7 @@ profiles:
 				t.Fatalf("fresh unreported lease released %d time(s), want 1", releases)
 			}
 			assertRunSessionValidationStoppedBeforeWork(t, path, commandMarker, syncMarker)
-			if _, exists, readErr := readLeaseClaimWithPresence(localContainerRunSessionTestLeaseID); readErr != nil || exists {
+			if _, exists, readErr := ReadLeaseClaimWithPresence(localContainerRunSessionTestLeaseID); readErr != nil || exists {
 				t.Fatalf("claim after validation failure exists=%t err=%v", exists, readErr)
 			}
 		})
@@ -2604,7 +2588,7 @@ func TestRunCommandLocalContainerLeaseOutputClaimFailureReleasesFreshLease(t *te
 	marker := filepath.Join(dir, "command-ran")
 	t.Setenv("CRABBOX_COMMAND_MARKER", marker)
 	runEnvProfileTestAcquireHook = func(AcquireRequest) {
-		if err := claimLeaseForRepoProvider(
+		if err := ClaimLeaseForRepoProvider(
 			localContainerRunSessionTestLeaseID,
 			"session-slug",
 			"local-container",
@@ -2661,7 +2645,7 @@ func TestRunCommandLocalContainerLeaseOutputWriteFailureReleasesFreshLease(t *te
 		if !set || !exists {
 			return errors.New("release did not receive the exact recorded claim")
 		}
-		return removeLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, claim, nil)
+		return RemoveLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, claim, nil)
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -2679,7 +2663,7 @@ func TestRunCommandLocalContainerLeaseOutputWriteFailureReleasesFreshLease(t *te
 	if releasedID != localContainerRunSessionTestLeaseID {
 		t.Fatalf("released lease=%q want %q", releasedID, localContainerRunSessionTestLeaseID)
 	}
-	if _, exists, readErr := readLeaseClaimWithPresence(localContainerRunSessionTestLeaseID); readErr != nil || exists {
+	if _, exists, readErr := ReadLeaseClaimWithPresence(localContainerRunSessionTestLeaseID); readErr != nil || exists {
 		t.Fatalf("claim residue exists=%t err=%v", exists, readErr)
 	}
 	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
@@ -6317,6 +6301,123 @@ func TestWindowsRemoteCapabilityPreflightCommandUsesCommandEnvironment(t *testin
 	}
 }
 
+func TestPackageManagerPreflightWindowsEnvironment(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows process environment restoration")
+	}
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failure_%t", fail), func(t *testing.T) {
+			env := map[string]string{"COREPACK_ENABLE_NETWORK": "1", "COREPACK_DEFAULT_TO_LATEST": "1", "COREPACK_ENABLE_AUTO_PIN": "1", "COREPACK_ENABLE_PROJECT_SPEC": "1", "PNPM_CONFIG_PM_ON_FAIL": "error"}
+			body := `Write-Output (($args -join ',') + '|' + $env:COREPACK_ENABLE_NETWORK + '|' + $env:COREPACK_DEFAULT_TO_LATEST + '|' + $env:COREPACK_ENABLE_AUTO_PIN + '|' + $env:COREPACK_ENABLE_DOWNLOAD_PROMPT + '|' + $env:COREPACK_ENABLE_PROJECT_SPEC + '|' + $env:PNPM_CONFIG_PM_ON_FAIL)`
+			if fail {
+				body = `throw 'ordinary probe error'`
+			}
+			script := "function npm { " + body + " }\nfunction pnpm { " + body + " }\nfunction yarn { " + body + " }\n"
+			script += windowsRemoteCapabilityPreflightScript(t.TempDir(), env, nil, []string{"npm", "pnpm", "yarn"})
+			script += `Write-Output ('after=' + $env:COREPACK_ENABLE_NETWORK + '|' + $env:COREPACK_DEFAULT_TO_LATEST + '|' + $env:COREPACK_ENABLE_AUTO_PIN + '|' + [string](Test-Path Env:COREPACK_ENABLE_DOWNLOAD_PROMPT) + '|' + $env:COREPACK_ENABLE_PROJECT_SPEC + '|' + $env:PNPM_CONFIG_PM_ON_FAIL)`
+			path := filepath.Join(t.TempDir(), "probe.ps1")
+			if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", path)
+			for _, value := range os.Environ() {
+				if !strings.HasPrefix(strings.ToUpper(value), "COREPACK_") {
+					cmd.Env = append(cmd.Env, value)
+				}
+			}
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("Windows probe: %v\n%s", err, out)
+			}
+			for _, tool := range []string{"npm", "pnpm", "yarn"} {
+				want := "--version|0|0|0|0|1|error"
+				if tool == "pnpm" {
+					want = "--version|0|0|0|0|1|ignore"
+				}
+				if fail {
+					want = "error:ordinary probe error"
+				}
+				if !strings.Contains(string(out), tool+"="+want) {
+					t.Fatalf("%s probe output: %s", tool, out)
+				}
+			}
+			if !strings.Contains(string(out), "after=1|1|1|False|1|error") {
+				t.Fatalf("Windows environment not restored: %s", out)
+			}
+		})
+	}
+}
+
+func TestPackageManagerPreflightEnvironment(t *testing.T) {
+	for _, tool := range []string{"npm", "pnpm", "yarn"} {
+		t.Run(tool, func(t *testing.T) {
+			windows := windowsPreflightProbe(tool)
+			for _, setting := range preflightProbeEnvironment(tool) {
+				if !strings.Contains(windows, psQuote(setting.name)+"="+psQuote(setting.value)) {
+					t.Fatalf("Windows probe missing %s: %s", setting.name, windows)
+				}
+			}
+			if !strings.Contains(windows, "@('--version')") {
+				t.Fatalf("literal arguments changed: %s", windows)
+			}
+		})
+	}
+	if len(preflightProbeEnvironment("python")) != 0 || len(preflightProbeEnvironment("python3")) != 0 || len(preflightProbeEnvironment("corepack")) != 0 {
+		t.Fatal("unrelated version probes must keep their environment")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX execution; Windows renderer assertions above remain active")
+	}
+	for _, exitCode := range []int{0, 12} {
+		t.Run(fmt.Sprintf("posix_exit_%d", exitCode), func(t *testing.T) {
+			bin := t.TempDir()
+			for name, path := range map[string]string{"id": "/usr/bin/id", "sed": "/usr/bin/sed", "whoami": "/usr/bin/whoami"} {
+				if err := os.Symlink(path, filepath.Join(bin, name)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			files := map[string]string{
+				"bash":    "#!/bin/sh\nif [ \"$1\" = \"-lc\" ]; then exec /bin/bash --noprofile --norc -c \"$2\"; fi\nexec /bin/bash \"$@\"\n",
+				"python3": "#!/bin/sh\nprintf '%s|%s|%s|%s|%s|%s|%s\\n' \"$COREPACK_ENABLE_NETWORK\" \"$COREPACK_DEFAULT_TO_LATEST\" \"$COREPACK_ENABLE_AUTO_PIN\" \"${COREPACK_ENABLE_DOWNLOAD_PROMPT-unset}\" \"$COREPACK_ENABLE_PROJECT_SPEC\" \"$PNPM_CONFIG_PM_ON_FAIL\" \"$pnpm_config_pm_on_fail\"\n",
+			}
+			for _, tool := range []string{"npm", "pnpm", "yarn"} {
+				files[tool] = "#!/bin/sh\nprintf '%s|%s|%s|%s|%s|%s|%s|%s\\n' \"$*\" \"$COREPACK_ENABLE_NETWORK\" \"$COREPACK_DEFAULT_TO_LATEST\" \"$COREPACK_ENABLE_AUTO_PIN\" \"$COREPACK_ENABLE_DOWNLOAD_PROMPT\" \"$COREPACK_ENABLE_PROJECT_SPEC\" \"$PNPM_CONFIG_PM_ON_FAIL\" \"$pnpm_config_pm_on_fail\"\n" + fmt.Sprintf("exit %d\n", exitCode)
+			}
+			for name, body := range files {
+				if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			repo := t.TempDir()
+			profile := filepath.Join(repo, "profile.env")
+			if err := os.WriteFile(profile, []byte("export COREPACK_ENABLE_AUTO_PIN=1\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			env := map[string]string{"PATH": bin, "COREPACK_ENABLE_NETWORK": "1", "COREPACK_DEFAULT_TO_LATEST": "1", "COREPACK_ENABLE_PROJECT_SPEC": "1", "PNPM_CONFIG_PM_ON_FAIL": "error", "pnpm_config_pm_on_fail": "download"}
+			command := remoteCapabilityPreflightCommand(repo, env, []string{profile}, []string{"npm", "pnpm", "yarn", "python3"})
+			command += "; " + remoteShellCommandWithEnvFiles(repo, env, []string{profile}, "python3")
+			cmd := exec.Command("/bin/sh", "-c", command)
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + t.TempDir()}
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("probe/workload: %v\n%s", err, out)
+			}
+			for _, tool := range []string{"npm", "pnpm", "yarn"} {
+				want := "error"
+				if tool == "pnpm" {
+					want = "ignore"
+				}
+				if !strings.Contains(string(out), tool+"=--version|0|0|0|0|1|"+want+"|download\n") {
+					t.Fatalf("probe policy missing for %s: %s", tool, out)
+				}
+			}
+			if !strings.Contains(string(out), "python3=1|1|1|unset|1|error|download\n") || !strings.HasSuffix(string(out), "1|1|1|unset|1|error|download\n") {
+				t.Fatalf("later probe/workload environment changed: %s", out)
+			}
+		})
+	}
+}
+
 func TestWindowsRemoteCapabilityPreflightUploadsScriptBeforeRunning(t *testing.T) {
 	dir := t.TempDir()
 	logPath := installRecordingSSH(t, dir)
@@ -6659,6 +6760,246 @@ func TestCMakePreflightLiteralCommandGeneration(t *testing.T) {
 	}
 }
 
+func TestFunctionalPreflightProcessExit(t *testing.T) {
+	value := os.Getenv("CRABBOX_TEST_PREFLIGHT_EXIT")
+	if value == "" {
+		return
+	}
+	code, err := strconv.Atoi(value)
+	if err != nil || code < 1 || code > 255 {
+		t.Fatal("invalid synthetic exit")
+	}
+	os.Exit(code)
+}
+
+func TestFunctionalPreflightCompletionLifecycle(t *testing.T) {
+	const nonce = "0123456789abcdef0123456789abcdef"
+	for _, tc := range []struct {
+		name, state                                                                 string
+		code                                                                        int
+		canceled, partial, retireFailure, joinedFailure, ownerWrapped, ownerFailure bool
+	}{
+		{name: "ready", state: "ready"},
+		{name: "missing", state: "missing-python3", code: 20},
+		{name: "venv", state: "venv-unavailable", code: 21},
+		{name: "pip", state: "pip-unavailable", code: 22},
+		{name: "timeout", state: "timed-out", code: 74},
+		{name: "cleaned worker failure", state: "worker-failed", code: 23},
+		{name: "caller cancellation", state: "canceled", code: 74, canceled: true},
+		{name: "owner canceled with successful transport", state: "canceled"},
+		{name: "missing completion", code: 255, partial: true},
+		{name: "retirement failed", state: "ready", retireFailure: true},
+		{name: "transport failure is not readiness", state: "ready", code: 255},
+		{name: "capability exit with envelope cleanup failure", state: "missing-python3", code: 20, joinedFailure: true},
+		{name: "ordinary workspace owner wrapper", state: "venv-unavailable", code: 21, ownerWrapped: true},
+		{name: "workspace setup error is retained", state: "venv-unavailable", code: 21, ownerFailure: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			old := runFunctionalPreflightControl
+			t.Cleanup(func() { runFunctionalPreflightControl = old })
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if tc.canceled {
+				cancel()
+			}
+			var runErr error
+			if tc.code != 0 {
+				childCtx, childCancel := context.WithTimeout(t.Context(), 10*time.Second)
+				defer childCancel()
+				child := exec.CommandContext(childCtx, os.Args[0], "-test.run=^TestFunctionalPreflightProcessExit$")
+				child.Env = append(os.Environ(), "CRABBOX_TEST_PREFLIGHT_EXIT="+strconv.Itoa(tc.code))
+				runErr = child.Run()
+				if exitCode(runErr) != tc.code {
+					t.Fatalf("synthetic process exit=%v", runErr)
+				}
+				if tc.joinedFailure {
+					runErr = errors.Join(runErr, errors.New("synthetic envelope cleanup failure"))
+				}
+				if tc.ownerWrapped {
+					_, _, finish := workspaceOwnerSetupStreams("synthetic-marker", io.Discard, io.Discard)
+					runErr = finish(runErr)
+				}
+				if tc.ownerFailure {
+					runErr = &workspaceOwnerSetupError{phase: "synthetic", cause: runErr}
+				}
+			}
+			calls := []string{}
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), pythonVenvPreflightCleanupTime)
+			defer cleanupCancel()
+			sharedCleanup := cleanupCtx
+			runFunctionalPreflightControl = func(cleanupCtx context.Context, _ SSHTarget, gotNonce, action string) ([]byte, error) {
+				deadline, ok := cleanupCtx.Deadline()
+				if cleanupCtx != sharedCleanup || gotNonce != nonce || cleanupCtx.Err() != nil || !ok || time.Until(deadline) > pythonVenvPreflightCleanupTime {
+					t.Fatal("cleanup lost its independent bounded operation identity")
+				}
+				calls = append(calls, action)
+				if action == "retire" {
+					if tc.retireFailure {
+						return nil, errors.New("synthetic retirement failure")
+					}
+					return nil, nil
+				}
+				if tc.partial {
+					return []byte("CBX-PREFLIGHT-1\n"), nil
+				}
+				return []byte("CBX-PREFLIGHT-1\n" + nonce + "\n" + tc.state + "\nworker-quiesced\nscratch-removed\ncomplete\n"), nil
+			}
+			got, err := finishFunctionalPreflight(ctx, cleanupCtx, SSHTarget{}, nonce, runErr)
+			wantAction := "observe"
+			if tc.code != 0 || tc.canceled {
+				wantAction = "cancel"
+			}
+			wantCalls := []string{wantAction, "retire"}
+			if tc.partial {
+				wantCalls = wantCalls[:1]
+			}
+			if !reflect.DeepEqual(calls, wantCalls) {
+				t.Fatalf("calls=%v want=%v", calls, wantCalls)
+			}
+			failure := tc.canceled || tc.state == "canceled" || tc.partial || tc.retireFailure || tc.code == 255 || tc.joinedFailure || tc.ownerFailure
+			if (err != nil) != failure {
+				t.Fatalf("completion=%+v error=%v", got, err)
+			}
+			if failure {
+				if got.State != "" {
+					t.Fatalf("failed completion claimed capability: %+v", got)
+				}
+			} else if got.State != tc.state || !got.WorkerQuiesced || !got.ScratchRemoved || !got.StageRetired {
+				t.Fatalf("completion=%+v", got)
+			}
+			if tc.canceled && !errors.Is(err, context.Canceled) {
+				t.Fatal("caller cancellation lost")
+			}
+			if tc.state == "canceled" && !tc.canceled && errors.Is(err, context.Canceled) {
+				t.Fatal("invented caller cancellation")
+			}
+			if (tc.code == 255 || tc.joinedFailure || tc.ownerFailure) && !errors.Is(err, runErr) {
+				t.Fatal("original transport outcome lost")
+			}
+			wantState, wantCleanup := tc.state, "confirmed"
+			if failure {
+				wantState = "unavailable"
+			}
+			if tc.canceled {
+				wantState = "canceled"
+			}
+			if tc.partial || tc.retireFailure {
+				wantCleanup = "unconfirmed"
+			}
+			wantDiagnostic := "python3-venv=" + wantState + " cleanup=" + wantCleanup
+			if got := functionalPreflightDiagnostic(ctx, got, err); got != wantDiagnostic {
+				t.Fatalf("diagnostic=%q want=%q", got, wantDiagnostic)
+			}
+		})
+	}
+}
+
+func TestFunctionalPreflightCompletion(t *testing.T) {
+	const nonce = "0123456789abcdef0123456789abcdef"
+	record := func(state string) string {
+		return "CBX-PREFLIGHT-1\n" + nonce + "\n" + state + "\nworker-quiesced\nscratch-removed\ncomplete\n"
+	}
+	for _, state := range []string{"ready", "missing-python3", "venv-unavailable", "pip-unavailable", "worker-failed", "timed-out", "canceled"} {
+		t.Run(state, func(t *testing.T) {
+			got, err := parseFunctionalPreflightCompletion([]byte(record(state)), nonce)
+			if err != nil || got.State != state || !got.WorkerQuiesced || !got.ScratchRemoved {
+				t.Fatalf("completion=%+v error=%v", got, err)
+			}
+		})
+	}
+	for _, tc := range []struct{ name, value, nonce string }{
+		{"missing", "", nonce},
+		{"partial", strings.TrimSuffix(record("ready"), "complete\n"), nonce},
+		{"other-operation", record("ready"), "abcdef0123456789abcdef0123456789"},
+		{"unknown-protocol", strings.Replace(record("ready"), "CBX-PREFLIGHT-1", "CBX-PREFLIGHT-2", 1), nonce},
+		{"unknown-state", record("finished"), nonce},
+		{"scratch-retained", strings.Replace(record("ready"), "scratch-removed", "scratch-retained", 1), nonce},
+		{"worker-only", "ready\n", nonce},
+		{"trailing-output", record("ready") + "extra\n", nonce},
+		{"oversized", strings.Repeat("x", functionalPreflightCompletionLimit+1), nonce},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseFunctionalPreflightCompletion([]byte(tc.value), tc.nonce)
+			if err == nil || err.Error() != "functional preflight cleanup unconfirmed" || got != (functionalPreflightCompletion{}) {
+				t.Fatalf("completion=%+v error=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestPythonVenvWorkerTemporaryEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX interpreter environment fixture")
+	}
+	root := t.TempDir()
+	tools := filepath.Join(root, "tools")
+	scratch := filepath.Join(root, "scratch")
+	ambient := filepath.Join(root, "ambient")
+	for _, dir := range []string{tools, scratch, ambient} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record, parent := filepath.Join(root, "child"), filepath.Join(root, "parent")
+	// Capture only the literal interpreter's environment/flags; real ensurepip
+	// containment is a separate runtime qualification, not simulated here.
+	writeExecutable(t, filepath.Join(tools, "python3"), "#!/bin/sh\nprintf '%s\\n' \"$TMPDIR\" \"$TMP\" \"$TEMP\" \"$1\" \"$2\" >"+shellQuote(record)+"\n")
+	script := pythonVenvPreflightWorker(scratch) + "\ncode=$?\nprintf '%s\\n' \"$TMPDIR\" \"$TMP\" \"$TEMP\" >" + shellQuote(parent) + "\nexit \"$code\"\n"
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/bin/bash", "-c", script)
+	cmd.Env = []string{"PATH=" + tools, "HOME=" + root, "TMPDIR=" + ambient, "TMP=" + ambient, "TEMP=" + ambient}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("worker environment: %v %s", err, out)
+	}
+	child, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(child) != strings.Repeat(scratch+"\n", 3)+"-I\n-B\n" {
+		t.Fatalf("child environment/flags=%q", child)
+	}
+	after, err := os.ReadFile(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != strings.Repeat(ambient+"\n", 3) {
+		t.Fatalf("caller temporary environment changed: %q", after)
+	}
+}
+
+func TestPythonVenvPreflightSelection(t *testing.T) {
+	if err := validatePreflightTools([]string{"python3-venv"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		target SSHTarget
+		want   string
+	}{
+		{"linux", SSHTarget{TargetOS: targetLinux}, "python3-venv"},
+		{"macos", SSHTarget{TargetOS: targetMacOS}, "python3-venv"},
+		{"wsl2", SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, "python3-venv"},
+		{"native windows", SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := strings.Join(preflightToolsForTarget(tc.target, []string{"python3-venv"}), ","); got != tc.want {
+				t.Fatalf("tools=%q want %q", got, tc.want)
+			}
+		})
+	}
+	for _, tool := range defaultPreflightToolNames {
+		if tool == "python3-venv" {
+			t.Fatal("functional probe became a default")
+		}
+	}
+	got := normalizePreflightToolNames([]string{"default,python3-venv,python3-venv"})
+	want := append(append([]string(nil), defaultPreflightToolNames...), "python3-venv")
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("deduplicated tools=%v want %v", got, want)
+	}
+}
+
 func TestCMakePreflightPOSIXPresentFirstLineAndMissing(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell behavior is covered on non-Windows CI")
@@ -6734,6 +7075,15 @@ func TestCMakePreflightNativeWindowsPresentAndMissing(t *testing.T) {
 }
 
 func TestCMakePreflightUserAndRepositoryConfig(t *testing.T) {
+	testPreflightToolUserAndRepositoryConfig(t, "cmake")
+}
+
+func TestPythonVenvPreflightUserAndRepositoryConfig(t *testing.T) {
+	testPreflightToolUserAndRepositoryConfig(t, "python3-venv")
+}
+
+func testPreflightToolUserAndRepositoryConfig(t *testing.T, tool string) {
+	t.Helper()
 	for _, source := range []string{"user", "repository"} {
 		t.Run(source, func(t *testing.T) {
 			clearConfigEnv(t)
@@ -6755,18 +7105,18 @@ func TestCMakePreflightUserAndRepositoryConfig(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := os.WriteFile(path, []byte("run:\n  preflightTools: [cmake]\n"), 0o600); err != nil {
+			if err := os.WriteFile(path, []byte("run:\n  preflightTools: ["+tool+"]\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			cfg, err := loadConfig()
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := strings.Join(cfg.Run.PreflightTools, ","); got != "cmake" {
+			if got := strings.Join(cfg.Run.PreflightTools, ","); got != tool {
 				t.Fatalf("%s run.preflightTools=%q", source, got)
 			}
 			if err := validatePreflightTools(cfg.Run.PreflightTools); err != nil {
-				t.Fatalf("%s cmake config should validate: %v", source, err)
+				t.Fatalf("%s %s config should validate: %v", source, tool, err)
 			}
 		})
 	}
@@ -6783,7 +7133,7 @@ func TestPreflightRawEmptyFlagKeepsConfiguredTools(t *testing.T) {
 			acquireCalls := 0
 			runEnvProfileTestAcquireHook = func(AcquireRequest) { acquireCalls++ }
 			t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
-			args := []string{"--provider", runEnvProfileTestProvider{}.Name(), "--preflight", "--no-sync", "--no-hydrate"}
+			args := []string{"--provider", runEnvProfileTestProvider{}.Spec().Name, "--preflight", "--no-sync", "--no-hydrate"}
 			if supplied {
 				args = append(args, "--preflight-tools", "")
 			}
@@ -6807,7 +7157,7 @@ func TestCMakeUnknownPreflightToolFailsBeforeAcquire(t *testing.T) {
 	t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
 
 	err := (App{Stdout: io.Discard, Stderr: io.Discard}).runCommand(t.Context(), []string{
-		"--provider", runEnvProfileTestProvider{}.Name(),
+		"--provider", runEnvProfileTestProvider{}.Spec().Name,
 		"--preflight",
 		"--preflight-tools", "cmake,cmake3",
 		"--no-sync",
@@ -8252,7 +8602,7 @@ func TestAutoRouteClaimLeaseProvider(t *testing.T) {
 	t.Run("exact id canonicalizes fixed AWS marker", func(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
 		const leaseID = "cbx_1257aaaa0001"
-		if err := claimLeaseForRepoProvider(leaseID, "fixed", FixedAWSClaimProvider, "/repo", time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProvider(leaseID, "fixed", FixedAWSClaimProvider, "/repo", time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
 		fs, provider := newFlags(t, "hetzner")
@@ -8271,10 +8621,10 @@ func TestAutoRouteClaimLeaseProvider(t *testing.T) {
 	t.Run("exact id wins over slug collision", func(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
 		const leaseID = "cbx_1257aaaa0002"
-		if err := claimLeaseForRepoProvider(leaseID, "exact-owner", "run-prepare-test", "/repo-a", time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProvider(leaseID, "exact-owner", "run-prepare-test", "/repo-a", time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
-		if err := claimLeaseForRepoProvider("cbx_1257bbbb0002", leaseID, "local-container", "/repo-b", time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProvider("cbx_1257bbbb0002", leaseID, "local-container", "/repo-b", time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
 		fs, provider := newFlags(t, "hetzner")
@@ -8289,7 +8639,7 @@ func TestAutoRouteClaimLeaseProvider(t *testing.T) {
 
 	t.Run("unique slug routes provider", func(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
-		if err := claimLeaseForRepoProvider("cbx_1257aaaa0003", "Blue Lobster", "local-container", "/repo", time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProvider("cbx_1257aaaa0003", "Blue Lobster", "local-container", "/repo", time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
 		fs, provider := newFlags(t, "hetzner")
@@ -8308,7 +8658,7 @@ func TestAutoRouteClaimLeaseProvider(t *testing.T) {
 	t.Run("duplicate slug within one provider defers scope resolution", func(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
 		for _, leaseID := range []string{"cbx_1257aaaa0007", "cbx_1257bbbb0007"} {
-			if err := claimLeaseForRepoProviderScope(leaseID, "Scoped Slug", "local-container", leaseID, "/repo", time.Minute, false); err != nil {
+			if err := ClaimLeaseForRepoProviderScope(leaseID, "Scoped Slug", "local-container", leaseID, "/repo", time.Minute, false); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -8326,7 +8676,7 @@ func TestAutoRouteClaimLeaseProvider(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
 		for i, providerName := range []string{"external", "exec-provider"} {
 			leaseID := fmt.Sprintf("cbx_1257eeee000%d", i)
-			if err := claimLeaseForRepoProviderScope(leaseID, "External Alias", providerName, leaseID, "/repo", time.Minute, false); err != nil {
+			if err := ClaimLeaseForRepoProviderScope(leaseID, "External Alias", providerName, leaseID, "/repo", time.Minute, false); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -8342,10 +8692,10 @@ func TestAutoRouteClaimLeaseProvider(t *testing.T) {
 
 	t.Run("ambiguous slug fails with guidance", func(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
-		if err := claimLeaseForRepoProvider("cbx_1257aaaa0004", "Shared Slug", "local-container", "/repo-a", time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProvider("cbx_1257aaaa0004", "Shared Slug", "local-container", "/repo-a", time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
-		if err := claimLeaseForRepoProvider("cbx_1257bbbb0004", "Shared Slug", "run-prepare-test", "/repo-b", time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProvider("cbx_1257bbbb0004", "Shared Slug", "run-prepare-test", "/repo-b", time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
 		fs, provider := newFlags(t, "hetzner")
@@ -8359,7 +8709,7 @@ func TestAutoRouteClaimLeaseProvider(t *testing.T) {
 	t.Run("explicit provider remains authoritative", func(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
 		const leaseID = "cbx_1257aaaa0005"
-		if err := claimLeaseForRepoProvider(leaseID, "explicit", "local-container", "/repo", time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProvider(leaseID, "explicit", "local-container", "/repo", time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
 		fs, provider := newFlags(t, "hetzner", "--provider", "run-prepare-test")

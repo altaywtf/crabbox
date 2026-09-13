@@ -59,8 +59,10 @@ to own replay, and caller cancellation never releases them.
 Automation may instead supply the canonical ID with `warmup --lease-id`. For
 direct AWS, direct Machine0, direct Daytona, direct local-container, and managed coordinator
 leases, that ID is an immutable create identity: an identical semantic replay
-returns the same lease, while intent drift returns `lease_id_conflict`. External
-providers also accept requested IDs when their protocol explicitly advertises
+returns the same live lease, while intent drift returns `lease_id_conflict`.
+Managed coordinator replay of the same terminal intent returns
+`fixed_lease_terminal`. External providers also accept requested IDs when their
+protocol explicitly advertises
 idempotent lease identity support. The coordinator durably stores a versioned
 normalized request hash. Direct AWS durably stores the intent and current
 resolved EC2 attempt in the normal lease claim before `RunInstances`, then uses
@@ -80,7 +82,10 @@ prevents older clients from treating it as an ordinary lease. Submitted cleanup
 records an exact deletion acknowledgment, then reconciles a scope-attested UUID
 404 against complete failure-inclusive database inventory. Durable cleanup entry
 blocks reuse; unknown UUIDs and an unqualified 404 retain custody. The ordinary
-search index and mutable label filters do not establish absence. See
+search index and mutable label filters do not establish absence. For successfully
+acquired children removed by native TTL or external deletion, `inspect`, `status`,
+and `stop` can publish the same terminal tombstone after verifying the current
+organization and complete failure-inclusive database absence. See
 [Daytona fixed operation IDs](../providers/daytona.md#fixed-operation-ids)
 for organization discovery and recovery limits.
 
@@ -100,7 +105,7 @@ match the persisted attempt exactly. Fixed AWS
 claims use the downgrade-safe local discriminator `aws-fixed-v1`; current
 clients map it to runtime AWS, while older clients skip/refuse it.
 
-Fixed IDs are single-use operation identities. Direct AWS, Machine0, and
+Fixed IDs are single-use operation identities. Direct AWS, Daytona, Machine0, and
 local-container keep a compact terminal claim tombstone after successful
 destroy release or exact missing-resource cleanup. Tombstones contain only the
 ID, slug, provider scope, versioned intent hash, timestamps, and terminal
@@ -146,7 +151,7 @@ crabbox checkpoint fork chk_abc123def456 --slug update-flow-smoke
 Crabbox is creating a new lease; existing leases keep their assigned slug.
 It is never an operation or idempotency key.
 
-Slugs are normalized everywhere they are accepted. `normalizeLeaseSlug`
+Slugs are normalized everywhere they are accepted. `NormalizeLeaseSlug`
 lowercases, keeps only `[a-z0-9]`, collapses every other run of characters into
 a single `-`, and trims leading and trailing dashes — so `Blue_Lobster` and
 `BLUE-LOBSTER` both resolve to `blue-lobster`. A requested slug must contain at
