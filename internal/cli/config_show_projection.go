@@ -36,7 +36,7 @@ func ConfigShowSecretState(value string) string { return tokenState(value) }
 
 // Names only: no legacy value projection or environment reads are needed to
 // protect existing text slots. Retire a name only when its legacy row migrates.
-const legacyConfigShowTextLabels = "config provider lease broker access_auth ssh sync env run capacity actions blacksmith agent_sandbox phala namespace namespace_instance morph e2b cubesandbox upstash_box smolvm blaxel nomad ascii_box superserve machine0 cloudflare fastapi_cloud cloudflare_dynamic_workers cloudflare_sandbox static results cache jobs aws_lambda_microvm github_codespaces lambda vast nvidia_brev nebius hostinger ovh scaleway tencentcloud azure_dynamic_sessions proxmox firecracker xcp_ng parallels inspection provider_status"
+const legacyConfigShowTextLabels = "config provider lease broker access_auth ssh sync env run capacity actions phala namespace namespace_instance morph e2b cubesandbox upstash_box smolvm blaxel nomad ascii_box superserve machine0 cloudflare fastapi_cloud cloudflare_dynamic_workers cloudflare_sandbox results cache jobs aws_lambda_microvm github_codespaces lambda vast nvidia_brev nebius hostinger ovh scaleway tencentcloud azure_dynamic_sessions proxmox xcp_ng inspection provider_status"
 
 func collectProviderConfigShowSections(cfg Config) ([]ProviderConfigShowSection, error) {
 	return collectProviderConfigShowSectionsFrom(cfg, registeredProviders())
@@ -49,7 +49,7 @@ func configShowNameValid(name string) bool {
 func collectProviderConfigShowSectionsFrom(cfg Config, providers []Provider) ([]ProviderConfigShowSection, error) {
 	known := make(map[string]bool, len(providers))
 	for _, provider := range providers {
-		known[provider.Name()] = true
+		known[provider.Spec().Name] = true
 	}
 	keys, labels, covered := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, label := range strings.Fields(legacyConfigShowTextLabels) {
@@ -63,43 +63,43 @@ func collectProviderConfigShowSectionsFrom(cfg Config, providers []Provider) ([]
 		}
 		section := projector.ConfigShowSection(cfg)
 		if !configShowNameValid(section.JSONKey) || !configShowNameValid(section.TextLabel) || len(section.Providers) == 0 || len(section.Fields) == 0 {
-			return nil, fmt.Errorf("provider %s: incomplete config-show section", provider.Name())
+			return nil, fmt.Errorf("provider %s: incomplete config-show section", provider.Spec().Name)
 		}
 		if keys[section.JSONKey] || labels[section.TextLabel] {
-			return nil, fmt.Errorf("provider %s: duplicate config-show section key or text label", provider.Name())
+			return nil, fmt.Errorf("provider %s: duplicate config-show section key or text label", provider.Spec().Name)
 		}
 		keys[section.JSONKey], labels[section.TextLabel] = true, true
 		ownerIncluded := false
 		for _, name := range section.Providers {
 			if !known[name] || covered[name] {
-				return nil, fmt.Errorf("provider %s: unknown or duplicate config-show coverage %q", provider.Name(), name)
+				return nil, fmt.Errorf("provider %s: unknown or duplicate config-show coverage %q", provider.Spec().Name, name)
 			}
 			covered[name] = true
-			ownerIncluded = ownerIncluded || name == provider.Name()
+			ownerIncluded = ownerIncluded || name == provider.Spec().Name
 		}
 		if !ownerIncluded {
-			return nil, fmt.Errorf("provider %s: config-show coverage omits its owner", provider.Name())
+			return nil, fmt.Errorf("provider %s: config-show coverage omits its owner", provider.Spec().Name)
 		}
 		jsonNames, textNames := map[string]bool{}, map[string]bool{}
 		for _, field := range section.Fields {
 			if field.JSONName == "" && field.TextName == "" {
-				return nil, fmt.Errorf("provider %s: unnamed config-show field", provider.Name())
+				return nil, fmt.Errorf("provider %s: unnamed config-show field", provider.Spec().Name)
 			}
 			if field.JSONName != "" {
 				if !configShowNameValid(field.JSONName) || jsonNames[field.JSONName] {
-					return nil, fmt.Errorf("provider %s: invalid or duplicate config-show JSON field %q", provider.Name(), field.JSONName)
+					return nil, fmt.Errorf("provider %s: invalid or duplicate config-show JSON field %q", provider.Spec().Name, field.JSONName)
 				}
 				jsonNames[field.JSONName] = true
 			}
 			if field.TextName != "" {
 				if !configShowNameValid(field.TextName) || textNames[field.TextName] {
-					return nil, fmt.Errorf("provider %s: invalid or duplicate config-show text field %q", provider.Name(), field.TextName)
+					return nil, fmt.Errorf("provider %s: invalid or duplicate config-show text field %q", provider.Spec().Name, field.TextName)
 				}
 				textNames[field.TextName] = true
 			}
 		}
 		if len(jsonNames) == 0 || len(textNames) == 0 {
-			return nil, fmt.Errorf("provider %s: config-show section requires both formats", provider.Name())
+			return nil, fmt.Errorf("provider %s: config-show section requires both formats", provider.Spec().Name)
 		}
 		sections = append(sections, section)
 	}

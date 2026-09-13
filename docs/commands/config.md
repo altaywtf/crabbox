@@ -26,6 +26,12 @@ report that override exactly as supplied, including a relative or symlink path.
 Without an override, they report the absolute OS user-config path. Reporting a
 path does not create the file or change its trust classification.
 
+`XDG_STATE_HOME` independently selects the local runtime-state root, including
+generated per-lease SSH keys and host trust. It must be an absolute operator-owned
+path; it is not a repository configuration option. Without it, existing OS
+default locations remain unchanged. See [SSH keys](../features/ssh-keys.md) for
+privacy requirements and why changing roots does not migrate or find old keys.
+
 ## config show
 
 Prints the merged effective configuration with secret values redacted:
@@ -278,6 +284,12 @@ file is written with `0600` permissions, and `crabbox doctor` flags it when the
 permissions are broader than that.
 
 ## Repo-local config
+
+Private local run recording is off by default. Set `history.local.enabled: true`
+only in your user config to enable it for runs; repository files cannot change
+this policy. An explicit `run --record-local=false` overrides the user setting.
+See [local history](../features/history-logs.md#private-local-history) for storage
+bounds, output scope, and offline readers.
 
 User config holds machine-wide defaults and secrets; repo-local config holds
 project-specific, checkout-shareable settings. Keep sync rules, environment

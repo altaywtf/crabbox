@@ -20,7 +20,7 @@ func (a App) configShow(args []string) error {
 		return err
 	}
 	if *controllerIdentityOut && !*jsonOut {
-		return exit(2, "--controller-provider-identity requires --json")
+		return Exit(2, "--controller-provider-identity requires --json")
 	}
 	cfg, err := loadConfigWithOverrides("", strings.TrimSpace(*providerOverride))
 	if err != nil {
@@ -359,28 +359,6 @@ func configShowView(cfg Config) map[string]any {
 			"workdir":         cfg.AzureDynamicSessions.Workdir,
 			"timeoutSecs":     cfg.AzureDynamicSessions.TimeoutSecs,
 		},
-		"blacksmith": map[string]any{
-			"org":         cfg.Blacksmith.Org,
-			"workflow":    cfg.Blacksmith.Workflow,
-			"job":         cfg.Blacksmith.Job,
-			"ref":         cfg.Blacksmith.Ref,
-			"idleTimeout": cfg.Blacksmith.IdleTimeout.String(),
-			"debug":       cfg.Blacksmith.Debug,
-		},
-		"agentSandbox": map[string]any{
-			"kubectl":             cfg.AgentSandbox.Kubectl,
-			"kubeconfig":          cfg.AgentSandbox.Kubeconfig,
-			"context":             cfg.AgentSandbox.Context,
-			"namespace":           cfg.AgentSandbox.Namespace,
-			"warmPool":            cfg.AgentSandbox.WarmPool,
-			"container":           cfg.AgentSandbox.Container,
-			"workdir":             cfg.AgentSandbox.Workdir,
-			"sandboxReadyTimeout": cfg.AgentSandbox.SandboxReadyTimeout.String(),
-			"podReadyTimeout":     cfg.AgentSandbox.PodReadyTimeout.String(),
-			"execTimeoutSecs":     cfg.AgentSandbox.ExecTimeoutSecs,
-			"deleteOnRelease":     cfg.AgentSandbox.DeleteOnRelease,
-			"forgetMissing":       cfg.AgentSandbox.ForgetMissing,
-		},
 		"namespace": map[string]any{
 			"image":               cfg.Namespace.Image,
 			"size":                cfg.Namespace.Size,
@@ -563,14 +541,6 @@ func configShowView(cfg Config) map[string]any {
 			"createTimeout": cfg.Machine0.CreateTimeout.String(),
 			"pollInterval":  cfg.Machine0.PollInterval.String(),
 		},
-		"static": map[string]any{
-			"id":       cfg.Static.ID,
-			"name":     cfg.Static.Name,
-			"host":     cfg.Static.Host,
-			"user":     cfg.Static.User,
-			"port":     cfg.Static.Port,
-			"workRoot": cfg.Static.WorkRoot,
-		},
 		"results": map[string]any{
 			"junit":          cfg.Results.JUnit,
 			"auto":           cfg.Results.Auto,
@@ -634,23 +604,6 @@ func configShowView(cfg Config) map[string]any {
 			"insecureTLS":       cfg.Incus.InsecureTLS,
 			"remoteImageServer": redactedConfigURL(cfg.Incus.RemoteImageServer),
 		},
-		"firecracker": map[string]any{
-			"binary":          cfg.Firecracker.Binary,
-			"jailer":          cfg.Firecracker.Jailer,
-			"kernel":          cfg.Firecracker.Kernel,
-			"rootfs":          cfg.Firecracker.RootFS,
-			"user":            cfg.Firecracker.User,
-			"workRoot":        cfg.Firecracker.WorkRoot,
-			"cpus":            cfg.Firecracker.CPUs,
-			"memoryMiB":       cfg.Firecracker.MemoryMiB,
-			"diskMiB":         cfg.Firecracker.DiskMiB,
-			"network":         cfg.Firecracker.Network,
-			"cniNetwork":      cfg.Firecracker.CNINetwork,
-			"cniConfDir":      cfg.Firecracker.CNIConfDir,
-			"cniBinDir":       cfg.Firecracker.CNIBinDir,
-			"launchTimeout":   cfg.Firecracker.LaunchTimeout.String(),
-			"deleteOnRelease": cfg.Firecracker.DeleteOnRelease,
-		},
 		"xcpNg": map[string]any{
 			"apiUrl":       redactedConfigURL(cfg.XCPNg.APIURL),
 			"username":     cfg.XCPNg.Username,
@@ -666,47 +619,7 @@ func configShowView(cfg Config) map[string]any {
 			"workRoot":     cfg.XCPNg.WorkRoot,
 			"insecureTLS":  cfg.XCPNg.InsecureTLS,
 		},
-		"parallels": map[string]any{
-			"template":         cfg.Parallels.Template,
-			"source":           cfg.Parallels.Source,
-			"sourceId":         cfg.Parallels.SourceID,
-			"sourceSnapshot":   cfg.Parallels.SourceSnapshot,
-			"sourceSnapshotId": cfg.Parallels.SourceSnapshotID,
-			"cloneMode":        cfg.Parallels.CloneMode,
-			"host":             cfg.Parallels.Host,
-			"hostUser":         cfg.Parallels.HostUser,
-			"hostKey":          tokenState(cfg.Parallels.HostKey),
-			"vmRoot":           cfg.Parallels.VMRoot,
-			"user":             cfg.Parallels.User,
-			"workRoot":         cfg.Parallels.WorkRoot,
-			"startupTimeout":   cfg.Parallels.StartupTimeout.String(),
-			"templates":        redactedParallelsTemplateConfigs(cfg.Parallels.Templates),
-			"hosts":            redactedParallelsHostConfigs(cfg.Parallels.Hosts),
-		},
 	}
-}
-
-func redactedParallelsTemplateConfigs(templates map[string]ParallelsTemplateConfig) map[string]ParallelsTemplateConfig {
-	if templates == nil {
-		return nil
-	}
-	redacted := make(map[string]ParallelsTemplateConfig, len(templates))
-	for name, template := range templates {
-		template.HostKey = tokenState(template.HostKey)
-		redacted[name] = template
-	}
-	return redacted
-}
-
-func redactedParallelsHostConfigs(hosts []ParallelsHostConfig) []ParallelsHostConfig {
-	if hosts == nil {
-		return nil
-	}
-	redacted := append(make([]ParallelsHostConfig, 0, len(hosts)), hosts...)
-	for i := range redacted {
-		redacted[i].Key = tokenState(redacted[i].Key)
-	}
-	return redacted
 }
 
 func writeConfigShowText(w io.Writer, cfg Config) error {
@@ -739,8 +652,12 @@ func writeConfigShowText(w io.Writer, cfg Config) error {
 	fmt.Fprintf(w, "run preflight_tools=%s\n", blank(strings.Join(cfg.Run.PreflightTools, ","), "-"))
 	fmt.Fprintf(w, "capacity market=%s strategy=%s fallback=%s regions=%s hints=%t\n", cfg.Capacity.Market, cfg.Capacity.Strategy, cfg.Capacity.Fallback, blank(strings.Join(cfg.Capacity.Regions, ","), "-"), cfg.Capacity.Hints)
 	fmt.Fprintf(w, "actions repo=%s workflow=%s job=%s ref=%s runner_version=%s ephemeral=%t labels=%s\n", blank(cfg.Actions.Repo, "-"), blank(cfg.Actions.Workflow, "-"), blank(cfg.Actions.Job, "-"), blank(cfg.Actions.Ref, "-"), cfg.Actions.RunnerVersion, cfg.Actions.Ephemeral, blank(strings.Join(cfg.Actions.RunnerLabels, ","), "-"))
-	fmt.Fprintf(w, "blacksmith org=%s workflow=%s job=%s ref=%s idle_timeout=%s debug=%t\n", blank(cfg.Blacksmith.Org, "-"), blank(cfg.Blacksmith.Workflow, "-"), blank(cfg.Blacksmith.Job, "-"), blank(cfg.Blacksmith.Ref, "-"), cfg.Blacksmith.IdleTimeout, cfg.Blacksmith.Debug)
-	fmt.Fprintf(w, "agent_sandbox kubectl=%s kubeconfig=%s context=%s namespace=%s warm_pool=%s container=%s workdir=%s sandbox_ready_timeout=%s pod_ready_timeout=%s exec_timeout_secs=%d delete_on_release=%t forget_missing=%t\n", blank(cfg.AgentSandbox.Kubectl, "-"), blank(cfg.AgentSandbox.Kubeconfig, "-"), blank(cfg.AgentSandbox.Context, "-"), blank(cfg.AgentSandbox.Namespace, "-"), blank(cfg.AgentSandbox.WarmPool, "-"), blank(cfg.AgentSandbox.Container, "-"), blank(cfg.AgentSandbox.Workdir, "-"), cfg.AgentSandbox.SandboxReadyTimeout, cfg.AgentSandbox.PodReadyTimeout, cfg.AgentSandbox.ExecTimeoutSecs, cfg.AgentSandbox.DeleteOnRelease, cfg.AgentSandbox.ForgetMissing)
+	if err := layout.writeSlot(w, "blacksmith"); err != nil {
+		return err
+	}
+	if err := layout.writeSlot(w, "agent_sandbox"); err != nil {
+		return err
+	}
 	fmt.Fprintf(w, "phala cli=%s instance_type=%s work_root=%s node_id=%s compose=%s attest=%s\n", blank(cfg.Phala.CLIPath, "-"), blank(cfg.Phala.InstanceType, "-"), blank(cfg.Phala.WorkRoot, "-"), blank(cfg.Phala.NodeID, "-"), blank(cfg.Phala.Compose, "-"), phalaAttest)
 	fmt.Fprintf(w, "namespace image=%s size=%s repository=%s site=%s volume_size_gb=%d auto_stop_idle_timeout=%s work_root=%s delete_on_release=%t\n", cfg.Namespace.Image, blank(cfg.Namespace.Size, "-"), blank(cfg.Namespace.Repository, "-"), blank(cfg.Namespace.Site, "-"), cfg.Namespace.VolumeSizeGB, cfg.Namespace.AutoStopIdleTimeout, cfg.Namespace.WorkRoot, cfg.Namespace.DeleteOnRelease)
 	fmt.Fprintf(w, "namespace_instance cli=%s machine_type=%s duration=%s region=%s endpoint=%s keychain=%s volumes=%d work_root=%s bare=%t\n", cfg.NamespaceInstance.CLIPath, blank(cfg.NamespaceInstance.MachineType, "-"), cfg.NamespaceInstance.Duration, blank(cfg.NamespaceInstance.Region, "-"), blank(redactedConfigURL(cfg.NamespaceInstance.Endpoint), "-"), blank(cfg.NamespaceInstance.Keychain, "-"), len(cfg.NamespaceInstance.Volumes), cfg.NamespaceInstance.WorkRoot, cfg.NamespaceInstance.Bare)
@@ -779,7 +696,9 @@ func writeConfigShowText(w io.Writer, cfg Config) error {
 	fmt.Fprintf(w, "fastapi_cloud api_url=%s app_id=%s team_id=%s auth=%s\n", blank(redactedConfigURL(cfg.FastAPICloud.APIURL), "-"), blank(cfg.FastAPICloud.AppID, "-"), blank(cfg.FastAPICloud.TeamID, "-"), tokenState(cfg.FastAPICloud.Token))
 	fmt.Fprintf(w, "cloudflare_dynamic_workers loader_url=%s compatibility_date=%s compatibility_flags=%s cache_mode=%s egress=%s cpu_ms=%d subrequests=%d timeout_secs=%d metadata=%d auth=%s\n", blank(redactedConfigURL(cfg.CloudflareDynamicWorkers.LoaderURL), "-"), blank(cfg.CloudflareDynamicWorkers.CompatibilityDate, "-"), blank(strings.Join(cfg.CloudflareDynamicWorkers.CompatibilityFlags, ","), "-"), cfg.CloudflareDynamicWorkers.CacheMode, cfg.CloudflareDynamicWorkers.Egress, cfg.CloudflareDynamicWorkers.CPUMs, cfg.CloudflareDynamicWorkers.Subrequests, cfg.CloudflareDynamicWorkers.TimeoutSecs, len(cfg.CloudflareDynamicWorkers.Metadata), tokenState(cfg.CloudflareDynamicWorkers.Token))
 	fmt.Fprintf(w, "cloudflare_sandbox url=%s workdir=%s exec_timeout_secs=%d forget_missing=%t auth=%s\n", blank(redactedConfigURL(cfg.CloudflareSandbox.BridgeURL), "-"), cfg.CloudflareSandbox.Workdir, cfg.CloudflareSandbox.ExecTimeoutSecs, cfg.CloudflareSandbox.ForgetMissing, tokenState(cfg.CloudflareSandbox.Token))
-	fmt.Fprintf(w, "static id=%s name=%s host=%s user=%s port=%s work_root=%s\n", blank(cfg.Static.ID, "-"), blank(cfg.Static.Name, "-"), blank(cfg.Static.Host, "-"), blank(cfg.Static.User, "-"), blank(cfg.Static.Port, "-"), blank(cfg.Static.WorkRoot, "-"))
+	if err := layout.writeSlot(w, "static"); err != nil {
+		return err
+	}
 	fmt.Fprintf(w, "results junit=%s auto=%t fail_on_failures=%t\n", blank(strings.Join(cfg.Results.JUnit, ","), "-"), cfg.Results.Auto, cfg.Results.FailOnFailures)
 	fmt.Fprintf(w, "cache pnpm=%t npm=%t docker=%t git=%t max_gb=%d purge_on_release=%t volumes=%d\n", cfg.Cache.Pnpm, cfg.Cache.Npm, cfg.Cache.Docker, cfg.Cache.Git, cfg.Cache.MaxGB, cfg.Cache.PurgeOnRelease, len(cfg.Cache.Volumes))
 	if len(cfg.Jobs) > 0 {
@@ -820,9 +739,13 @@ func writeConfigShowText(w io.Writer, cfg Config) error {
 		return err
 	}
 	fmt.Fprintf(w, "proxmox api_url=%s node=%s template_id=%d storage=%s pool=%s bridge=%s user=%s work_root=%s full_clone=%t auth=%s\n", blank(redactedConfigURL(cfg.Proxmox.APIURL), "-"), blank(cfg.Proxmox.Node, "-"), cfg.Proxmox.TemplateID, blank(cfg.Proxmox.Storage, "-"), blank(cfg.Proxmox.Pool, "-"), blank(cfg.Proxmox.Bridge, "-"), cfg.Proxmox.User, cfg.Proxmox.WorkRoot, cfg.Proxmox.FullClone, tokenState(cfg.Proxmox.TokenSecret))
-	fmt.Fprintf(w, "firecracker binary=%s jailer=%s kernel=%s rootfs=%s user=%s work_root=%s cpus=%d memory_mib=%d disk_mib=%d network=%s cni_network=%s cni_conf_dir=%s cni_bin_dir=%s launch_timeout=%s delete_on_release=%t\n", blank(cfg.Firecracker.Binary, "-"), blank(cfg.Firecracker.Jailer, "-"), blank(cfg.Firecracker.Kernel, "-"), blank(cfg.Firecracker.RootFS, "-"), blank(cfg.Firecracker.User, "-"), blank(cfg.Firecracker.WorkRoot, "-"), cfg.Firecracker.CPUs, cfg.Firecracker.MemoryMiB, cfg.Firecracker.DiskMiB, blank(cfg.Firecracker.Network, "-"), blank(cfg.Firecracker.CNINetwork, "-"), blank(cfg.Firecracker.CNIConfDir, "-"), blank(cfg.Firecracker.CNIBinDir, "-"), cfg.Firecracker.LaunchTimeout, cfg.Firecracker.DeleteOnRelease)
+	if err := layout.writeSlot(w, "firecracker"); err != nil {
+		return err
+	}
 	fmt.Fprintf(w, "xcp_ng api_url=%s username=%s template=%s template_uuid=%s sr=%s sr_uuid=%s network=%s network_uuid=%s host=%s user=%s work_root=%s insecure_tls=%t auth=%s\n", blank(redactedConfigURL(cfg.XCPNg.APIURL), "-"), blank(cfg.XCPNg.Username, "-"), blank(cfg.XCPNg.Template, "-"), blank(cfg.XCPNg.TemplateUUID, "-"), blank(cfg.XCPNg.SR, "-"), blank(cfg.XCPNg.SRUUID, "-"), blank(cfg.XCPNg.Network, "-"), blank(cfg.XCPNg.NetworkUUID, "-"), blank(cfg.XCPNg.Host, "-"), cfg.XCPNg.User, cfg.XCPNg.WorkRoot, cfg.XCPNg.InsecureTLS, tokenState(cfg.XCPNg.Password))
-	fmt.Fprintf(w, "parallels template=%s source=%s source_id=%s snapshot=%s snapshot_id=%s clone_mode=%s host=%s user=%s work_root=%s startup_timeout=%s templates=%d hosts=%d\n", blank(cfg.Parallels.Template, "-"), blank(cfg.Parallels.Source, "-"), blank(cfg.Parallels.SourceID, "-"), blank(cfg.Parallels.SourceSnapshot, "-"), blank(cfg.Parallels.SourceSnapshotID, "-"), cfg.Parallels.CloneMode, blank(cfg.Parallels.Host, "local"), cfg.Parallels.User, cfg.Parallels.WorkRoot, cfg.Parallels.StartupTimeout, len(cfg.Parallels.Templates), len(cfg.Parallels.Hosts))
+	if err := layout.writeSlot(w, "parallels"); err != nil {
+		return err
+	}
 	if err := layout.writeRemaining(w); err != nil {
 		return err
 	}
@@ -966,14 +889,14 @@ func (a App) configSetBroker(args []string) error {
 		return err
 	}
 	if *url == "" {
-		return exit(2, "config set-broker requires --url")
+		return Exit(2, "config set-broker requires --url")
 	}
 	if *mode != "" && *mode != string(BrokerModeManaged) && *mode != string(BrokerModeRegistered) {
-		return exit(2, "--mode must be managed or registered")
+		return Exit(2, "--mode must be managed or registered")
 	}
 	path := writableConfigPath()
 	if path == "" {
-		return exit(2, "user config directory is unavailable")
+		return Exit(2, "user config directory is unavailable")
 	}
 	file, err := readFileConfig(path)
 	if err != nil {
@@ -999,22 +922,22 @@ func (a App) configSetBroker(args []string) error {
 	if *tokenStdin {
 		data, err := io.ReadAll(os.Stdin)
 		if err != nil {
-			return exit(2, "read broker token: %v", err)
+			return Exit(2, "read broker token: %v", err)
 		}
 		token = strings.TrimSpace(string(data))
 		if token == "" {
-			return exit(2, "broker token from stdin is empty")
+			return Exit(2, "broker token from stdin is empty")
 		}
 	}
 	var adminToken string
 	if *adminTokenStdin {
 		data, err := io.ReadAll(os.Stdin)
 		if err != nil {
-			return exit(2, "read broker admin token: %v", err)
+			return Exit(2, "read broker admin token: %v", err)
 		}
 		adminToken = strings.TrimSpace(string(data))
 		if adminToken == "" {
-			return exit(2, "broker admin token from stdin is empty")
+			return Exit(2, "broker admin token from stdin is empty")
 		}
 	}
 	file.Broker.URL = *url
@@ -1056,9 +979,9 @@ func validateBrokerProvider(provider string) (string, error) {
 	}
 	spec := resolved.Spec()
 	if spec.Coordinator != CoordinatorSupported {
-		return "", exit(2, "provider %q cannot be used with a broker; supported broker providers are aws, azure, daytona, gcp, and hetzner", provider)
+		return "", Exit(2, "provider %q cannot be used with a broker; supported broker providers are aws, azure, daytona, gcp, and hetzner", provider)
 	}
-	return resolved.Name(), nil
+	return resolved.Spec().Name, nil
 }
 
 func validateBrokerProviderForMode(provider, mode string) (string, error) {
@@ -1076,7 +999,7 @@ func validateBrokerProviderForMode(provider, mode string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return resolved.Name(), nil
+	return resolved.Spec().Name, nil
 }
 
 func tokenState(token string) string {

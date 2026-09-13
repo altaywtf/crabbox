@@ -84,7 +84,7 @@ type configShowProjectionTestProvider struct {
 	section ProviderConfigShowSection
 }
 
-func (p configShowProjectionTestProvider) Name() string { return p.name }
+func (p configShowProjectionTestProvider) Spec() ProviderSpec { return ProviderSpec{Name: p.name} }
 func (p configShowProjectionTestProvider) ConfigShowSection(Config) ProviderConfigShowSection {
 	return p.section
 }
@@ -238,13 +238,14 @@ func TestConfigShowLegacySlotPositions(t *testing.T) {
 			if strings.HasPrefix(value, "jobs=") {
 				name = "jobs"
 			}
-			if name == "superserve" || name == "local_container" || name == "apple_container" || name == "mxc" || name == "docker_sandbox" || name == "machine0" || name == "cloudflare" || name == "jobs" || name == "aws" || name == "aws_lambda_microvm" || name == "azure" || name == "digitalocean" || name == "vultr" || name == "linode" || name == "github_codespaces" || name == "azure_dynamic_sessions" || name == "gcp" || name == "proxmox" {
+			switch name {
+			case "actions", "phala", "superserve", "local_container", "apple_container", "mxc", "docker_sandbox", "machine0", "cloudflare", "cloudflare_sandbox", "results", "jobs", "aws", "aws_lambda_microvm", "azure", "digitalocean", "vultr", "linode", "github_codespaces", "azure_dynamic_sessions", "gcp", "proxmox", "xcp_ng":
 				order = append(order, name)
 			}
 		}
 		return true
 	})
-	if got := strings.Join(order, ","); got != "superserve,local_container,apple_container,mxc,docker_sandbox,multipass,machine0,tart,lume,cloudflare,jobs,aws,aws_lambda_microvm,azure,digitalocean,vultr,linode,github_codespaces,azure_dynamic_sessions,gcp,proxmox" {
+	if got := strings.Join(order, ","); got != "actions,blacksmith,agent_sandbox,phala,superserve,local_container,apple_container,mxc,docker_sandbox,multipass,machine0,tart,lume,cloudflare,cloudflare_sandbox,static,results,jobs,aws,aws_lambda_microvm,azure,digitalocean,vultr,linode,github_codespaces,azure_dynamic_sessions,gcp,proxmox,firecracker,xcp_ng,parallels" {
 		t.Fatalf("legacy text slot positions: %s", got)
 	}
 }
@@ -333,8 +334,8 @@ func TestProviderConfigShowProjectionCollisionBeforeTextOutput(t *testing.T) {
 	s := projectionTestSection("collision_projection")
 	s.TextLabel = "config"
 	p := configShowProjectionTestProvider{name: "collision_projection", section: s}
-	providerRegistry[p.Name()] = p
-	t.Cleanup(func() { delete(providerRegistry, p.Name()) })
+	providerRegistry[p.Spec().Name] = p
+	t.Cleanup(func() { delete(providerRegistry, p.Spec().Name) })
 	var out bytes.Buffer
 	if err := writeConfigShowText(&out, Config{}); err == nil || out.Len() != 0 {
 		t.Fatalf("error=%v output=%q", err, out.String())
@@ -351,46 +352,25 @@ func TestProviderConfigShowFormattingBridges(t *testing.T) {
 	}
 }
 
-func TestConfigShowLocalCohortLegacyOwnershipRetired(t *testing.T) {
+func TestConfigShowMigratedLegacyOwnershipRetired(t *testing.T) {
 	view := configShowView(Config{})
-	for _, key := range []string{"localContainer", "appleContainer", "mxc", "dockerSandbox"} {
-		if _, exists := view[key]; exists {
-			t.Errorf("core still owns %s values", key)
-		}
-	}
-	for _, label := range []string{"local_container", "apple_container", "mxc", "docker_sandbox"} {
-		for _, reserved := range strings.Fields(legacyConfigShowTextLabels) {
-			if reserved == label {
-				t.Errorf("migrated label %s still reserved as legacy", label)
+	for _, tc := range []struct{ key, label string }{
+		{"localContainer", "local_container"}, {"appleContainer", "apple_container"}, {"mxc", "mxc"}, {"dockerSandbox", "docker_sandbox"},
+		{"aws", "aws"}, {"azure", "azure"}, {"gcp", "gcp"},
+		{"digitalocean", "digitalocean"}, {"vultr", "vultr"}, {"linode", "linode"},
+		{"blacksmith", "blacksmith"}, {"agentSandbox", "agent_sandbox"}, {"firecracker", "firecracker"},
+		{"parallels", "parallels"},
+		{"static", "static"},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			if _, exists := view[tc.key]; exists {
+				t.Errorf("core still owns %s values", tc.key)
 			}
-		}
-	}
-}
-
-func TestConfigShowCloudCohortLegacyOwnershipRetired(t *testing.T) {
-	view := configShowView(Config{})
-	for _, name := range []string{"aws", "azure", "gcp"} {
-		if _, exists := view[name]; exists {
-			t.Errorf("core still owns %s values", name)
-		}
-		for _, reserved := range strings.Fields(legacyConfigShowTextLabels) {
-			if reserved == name {
-				t.Errorf("migrated label %s still reserved as legacy", name)
+			for _, reserved := range strings.Fields(legacyConfigShowTextLabels) {
+				if reserved == tc.label {
+					t.Errorf("migrated label %s still reserved as legacy", tc.label)
+				}
 			}
-		}
-	}
-}
-
-func TestConfigShowVPSCohortLegacyOwnershipRetired(t *testing.T) {
-	view := configShowView(Config{})
-	for _, name := range []string{"digitalocean", "vultr", "linode"} {
-		if _, exists := view[name]; exists {
-			t.Errorf("core still owns %s values", name)
-		}
-		for _, reserved := range strings.Fields(legacyConfigShowTextLabels) {
-			if reserved == name {
-				t.Errorf("migrated label %s still reserved as legacy", name)
-			}
-		}
+		})
 	}
 }

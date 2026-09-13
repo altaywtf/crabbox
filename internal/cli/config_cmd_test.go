@@ -107,11 +107,11 @@ func TestProviderStatusSelectionAndOfflineContract(t *testing.T) {
 		}
 	}
 	for _, provider := range registeredProviders() {
-		for _, alias := range append([]string{provider.Name()}, provider.Aliases()...) {
+		for _, alias := range append([]string{provider.Spec().Name}, provider.Spec().Aliases...) {
 			cfg := Config{Provider: alias, providerSelectionSource: providerSelectionFlag}
 			selected := providerConfigStatus(cfg)
 			for name, entry := range selected.Providers {
-				want := name == provider.Name()
+				want := name == provider.Spec().Name
 				if entry.Selection.Selected != want || (entry.Selection.Source != nil) != want {
 					t.Fatalf("alias %s selection incorrectly attributed to %s", alias, name)
 				}
@@ -197,7 +197,11 @@ type configArchitectureTestProvider struct {
 	architectureCapabilityTestProvider
 }
 
-func (configArchitectureTestProvider) Name() string { return "config-architecture-test" }
+func (p configArchitectureTestProvider) Spec() ProviderSpec {
+	spec := p.architectureCapabilityTestProvider.Spec()
+	spec.Name = "config-architecture-test"
+	return spec
+}
 func (configArchitectureTestProvider) DescribeImplicitArchitecture(Config) string {
 	return "native"
 }
@@ -216,14 +220,14 @@ func isolatedConfigPath(t *testing.T) string {
 func TestConfigShowUsesProviderImplicitArchitecture(t *testing.T) {
 	provider := configArchitectureTestProvider{}
 	RegisterProvider(provider)
-	t.Cleanup(func() { delete(providerRegistry, provider.Name()) })
+	t.Cleanup(func() { delete(providerRegistry, provider.Spec().Name) })
 	for _, tc := range []struct {
 		name, provider, architecture, want string
 		explicit                           bool
 	}{
-		{"implicit", provider.Name(), ArchitectureAMD64, "native", false},
-		{"explicit amd64", provider.Name(), ArchitectureAMD64, ArchitectureAMD64, true},
-		{"explicit arm64", provider.Name(), ArchitectureARM64, ArchitectureARM64, true},
+		{"implicit", provider.Spec().Name, ArchitectureAMD64, "native", false},
+		{"explicit amd64", provider.Spec().Name, ArchitectureAMD64, ArchitectureAMD64, true},
+		{"explicit arm64", provider.Spec().Name, ArchitectureARM64, ArchitectureARM64, true},
 		{"no descriptor", "unknown-config-provider", ArchitectureAMD64, ArchitectureAMD64, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -485,49 +489,6 @@ func TestNamespaceInstanceConfigShowRedactsEndpointCredentials(t *testing.T) {
 	}
 }
 
-func TestConfigShowIncludesAgentSandboxRoute(t *testing.T) {
-	cfg := baseConfig()
-	cfg.AgentSandbox.Kubectl = "/opt/bin/kubectl"
-	cfg.AgentSandbox.Kubeconfig = "/tmp/agent-kubeconfig"
-	cfg.AgentSandbox.Context = "agent-context"
-	cfg.AgentSandbox.Namespace = "sandboxes"
-	cfg.AgentSandbox.WarmPool = "linux-pool"
-	cfg.AgentSandbox.Container = "worker"
-	cfg.AgentSandbox.Workdir = "/workspace/my-app"
-	cfg.AgentSandbox.SandboxReadyTimeout = 2 * time.Minute
-	cfg.AgentSandbox.PodReadyTimeout = 45 * time.Second
-	cfg.AgentSandbox.ExecTimeoutSecs = 42
-	cfg.AgentSandbox.DeleteOnRelease = false
-	cfg.AgentSandbox.ForgetMissing = true
-
-	view := configShowView(cfg)
-	agent, ok := view["agentSandbox"].(map[string]any)
-	if !ok || agent["kubeconfig"] != "/tmp/agent-kubeconfig" || agent["warmPool"] != "linux-pool" ||
-		agent["sandboxReadyTimeout"] != "2m0s" || agent["deleteOnRelease"] != false || agent["forgetMissing"] != true {
-		t.Fatalf("agentSandbox view=%#v", agent)
-	}
-	var text bytes.Buffer
-	writeConfigShowText(&text, cfg)
-	for _, want := range []string{
-		"agent_sandbox kubectl=/opt/bin/kubectl",
-		"kubeconfig=/tmp/agent-kubeconfig",
-		"context=agent-context",
-		"namespace=sandboxes",
-		"warm_pool=linux-pool",
-		"container=worker",
-		"workdir=/workspace/my-app",
-		"sandbox_ready_timeout=2m0s",
-		"pod_ready_timeout=45s",
-		"exec_timeout_secs=42",
-		"delete_on_release=false",
-		"forget_missing=true",
-	} {
-		if !strings.Contains(text.String(), want) {
-			t.Fatalf("config show missing %q: %q", want, text.String())
-		}
-	}
-}
-
 func TestConfigShowIncludesCubeSandboxWithoutSecret(t *testing.T) {
 	const secret = "cubesandbox-secret"
 	cfg := baseConfig()
@@ -602,7 +563,7 @@ func TestConfigShowIncludesPhalaConfig(t *testing.T) {
 	}
 }
 
-func TestConfigShowIncludesFirecrackerConfig(t *testing.T) {
+func TestFirecrackerConfigDefaultsPreserveConfiguredValues(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "firecracker"
 	cfg.Firecracker.Binary = "/opt/bin/firecracker"
@@ -620,42 +581,12 @@ func TestConfigShowIncludesFirecrackerConfig(t *testing.T) {
 	cfg.Firecracker.CNIBinDir = "/opt/cni/lab"
 	cfg.Firecracker.LaunchTimeout = 3 * time.Minute
 	cfg.Firecracker.DeleteOnRelease = false
+	before := cfg.Firecracker
 	if err := applyProviderConfigDefaults(&cfg); err != nil {
 		t.Fatal(err)
 	}
-
-	view := configShowView(cfg)
-	firecracker, ok := view["firecracker"].(map[string]any)
-	if !ok || firecracker["binary"] != "/opt/bin/firecracker" || firecracker["jailer"] != "/opt/bin/jailer" ||
-		firecracker["kernel"] != "/var/lib/firecracker/vmlinux" || firecracker["rootfs"] != "/var/lib/firecracker/rootfs.ext4" ||
-		firecracker["workRoot"] != "/workspace/firecracker" || firecracker["cpus"] != 6 ||
-		firecracker["memoryMiB"] != 12288 || firecracker["diskMiB"] != 32768 ||
-		firecracker["cniNetwork"] != "lab-firecracker" || firecracker["launchTimeout"] != "3m0s" ||
-		firecracker["deleteOnRelease"] != false {
-		t.Fatalf("firecracker view=%#v", firecracker)
-	}
-	var text bytes.Buffer
-	writeConfigShowText(&text, cfg)
-	for _, want := range []string{
-		"firecracker binary=/opt/bin/firecracker",
-		"jailer=/opt/bin/jailer",
-		"kernel=/var/lib/firecracker/vmlinux",
-		"rootfs=/var/lib/firecracker/rootfs.ext4",
-		"user=runner",
-		"work_root=/workspace/firecracker",
-		"cpus=6",
-		"memory_mib=12288",
-		"disk_mib=32768",
-		"network=cni",
-		"cni_network=lab-firecracker",
-		"cni_conf_dir=/etc/cni/lab",
-		"cni_bin_dir=/opt/cni/lab",
-		"launch_timeout=3m0s",
-		"delete_on_release=false",
-	} {
-		if !strings.Contains(text.String(), want) {
-			t.Fatalf("config show missing %q: %q", want, text.String())
-		}
+	if cfg.Firecracker != before {
+		t.Fatalf("defaults changed explicitly configured Firecracker values: got %#v, want %#v", cfg.Firecracker, before)
 	}
 }
 
@@ -3043,68 +2974,6 @@ func TestConfigShowRedactsAllEndpointURLComponents(t *testing.T) {
 				t.Fatalf("%s output leaked %q: %s", name, secret, output)
 			}
 		}
-	}
-}
-
-func TestConfigShowRedactsParallelsSSHKeys(t *testing.T) {
-	const (
-		topLevelKey = "top-level-private-key-sentinel"
-		templateKey = "template-private-key-sentinel"
-		hostKey     = "host-private-key-sentinel"
-	)
-	cfg := Config{}
-	cfg.Parallels.HostKey = topLevelKey
-	cfg.Parallels.Templates = map[string]ParallelsTemplateConfig{
-		"macos": {
-			Source:  "macOS Tahoe",
-			Host:    "template-host.example.test",
-			HostKey: templateKey,
-		},
-	}
-	cfg.Parallels.Hosts = []ParallelsHostConfig{{
-		Name: "builder",
-		Host: "builder.example.test",
-		Key:  hostKey,
-	}}
-
-	var text bytes.Buffer
-	writeConfigShowText(&text, cfg)
-	jsonData, err := json.Marshal(configShowView(cfg))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for name, output := range map[string]string{"text": text.String(), "json": string(jsonData)} {
-		for _, secret := range []string{topLevelKey, templateKey, hostKey} {
-			if strings.Contains(output, secret) {
-				t.Fatalf("%s config output leaked %q: %s", name, secret, output)
-			}
-		}
-	}
-
-	var decoded map[string]any
-	if err := json.Unmarshal(jsonData, &decoded); err != nil {
-		t.Fatal(err)
-	}
-	parallels := decoded["parallels"].(map[string]any)
-	if parallels["hostKey"] != "configured" {
-		t.Fatalf("top-level hostKey=%#v, want configured", parallels["hostKey"])
-	}
-	templates := parallels["templates"].(map[string]any)
-	template := templates["macos"].(map[string]any)
-	if template["HostKey"] != "configured" || template["Source"] != "macOS Tahoe" {
-		t.Fatalf("template view=%#v", template)
-	}
-	hosts := parallels["hosts"].([]any)
-	host := hosts[0].(map[string]any)
-	if host["Key"] != "configured" || host["Host"] != "builder.example.test" {
-		t.Fatalf("host view=%#v", host)
-	}
-
-	if cfg.Parallels.HostKey != topLevelKey || cfg.Parallels.Templates["macos"].HostKey != templateKey || cfg.Parallels.Hosts[0].Key != hostKey {
-		t.Fatal("config-show redaction mutated the effective Parallels config")
-	}
-	if redactedParallelsTemplateConfigs(nil) != nil || redactedParallelsHostConfigs(nil) != nil {
-		t.Fatal("config-show redaction changed nil Parallels collections")
 	}
 }
 
