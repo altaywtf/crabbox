@@ -544,3 +544,171 @@ jobs:
 
       - name: Check docs
         run: scripts/check-docs.sh
+
+  powershell51-architecture-qualification:
+    name: Manual PowerShell 5.1 architecture qualification
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      BASELINE_COMMIT: 1a8ac7829b535179d47b82bbe5cf1e5574f41b9e
+      CANDIDATE_COMMIT: 96f9a050b69b4769a9bbfc8b3f23be9eef5ff48b
+      CGO_ENABLED: '0'
+      GOMAXPROCS: '2'
+    steps:
+      - name: Require the reviewed immutable candidate binding
+        shell: pwsh
+        run: |
+          if ($env:CANDIDATE_COMMIT -notmatch '^[0-9a-f]{40}$') {
+            throw 'Replace CANDIDATE_COMMIT with the reviewed shipping test-hook commit before dispatch'
+          }
+      - name: Check out the immutable baseline
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: openclaw/crabbox
+          ref: ${{ env.BASELINE_COMMIT }}
+          path: ps51-baseline
+          persist-credentials: false
+      - name: Check out the immutable candidate
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: openclaw/crabbox
+          ref: ${{ env.CANDIDATE_COMMIT }}
+          path: ps51-candidate
+          persist-credentials: false
+      - name: Set up the candidate's pinned Go version
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: ps51-candidate/go.mod
+          cache: false
+      - name: Qualify the unchanged production query on the same Desktop 5.1 runner
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $name = 'TestStaticSSHArchitectureLocalWindowsPowerShell51Probe'
+          $baseline = Join-Path $env:GITHUB_WORKSPACE 'ps51-baseline'
+          $candidate = Join-Path $env:GITHUB_WORKSPACE 'ps51-candidate'
+          $evidence = Join-Path $env:RUNNER_TEMP 'ps51-architecture-qualification'
+          New-Item -ItemType Directory -Path $evidence -ErrorAction Stop | Out-Null
+          $productionPath = 'internal/providers/ssh/architecture.go'
+          $testPath = 'internal/providers/ssh/architecture_local_test.go'
+          $receipt = [ordered]@{
+            qualified = $false
+            scope = 'Local production architecture query only; not SSH transport, full CLI, or ARM64 task execution'
+            runnerOS = $env:RUNNER_OS
+            runnerArch = $env:RUNNER_ARCH
+            baselineHead = $env:BASELINE_COMMIT
+            candidateHead = $env:CANDIDATE_COMMIT
+            baselineProductionBlob = '315f2a100c8a788727d59e465b2b7bad031728a5'
+            candidateProductionBlob = '6354596b892881afa09ea16fd953006dab346f17'
+          }
+          function Invoke-CheckedGit([string]$Root, [string[]]$GitArgs) {
+            $value = @(& git -C $Root @GitArgs)
+            if ($LASTEXITCODE -ne 0) { throw "Git verification failed: $($GitArgs[0])" }
+            return $value
+          }
+          function Get-SourceSnapshot([string]$Root) {
+            $files = [ordered]@{}
+            foreach ($path in (Invoke-CheckedGit $Root @('ls-files'))) {
+              $files[$path] = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Root $path)).Hash.ToLowerInvariant()
+            }
+            return ([ordered]@{
+              head = (Invoke-CheckedGit $Root @('rev-parse', 'HEAD'))
+              index = @(Invoke-CheckedGit $Root @('ls-files', '--stage'))
+              files = $files
+            } | ConvertTo-Json -Depth 8 -Compress)
+          }
+          function Invoke-ProbeTest([string]$Label, [string]$Root) {
+            Push-Location $Root
+            try {
+              $stderrPath = Join-Path $evidence "$Label.stderr.txt"
+              $lines = @(& go test ./internal/providers/ssh -run "^$name`$" -count=1 -timeout=1m -json 2> $stderrPath)
+              $code = $LASTEXITCODE
+              $lines | Set-Content -Encoding utf8NoBOM -LiteralPath (Join-Path $evidence "$Label.jsonl")
+              Write-Host "BEGIN $Label complete Go JSON"
+              $lines | ForEach-Object { Write-Host $_ }
+              Write-Host "END $Label complete Go JSON; exit=$code"
+              Get-Content -LiteralPath $stderrPath | ForEach-Object { Write-Host $_ }
+              $records = @($lines | ForEach-Object { $_ | ConvertFrom-Json })
+              $output = ($records | Where-Object { $_.Test -eq $name -and $_.Action -eq 'output' } | ForEach-Object { $_.Output }) -join ''
+              $allOutput = ($records | Where-Object { $_.Action -eq 'output' } | ForEach-Object { $_.Output }) -join ''
+              $allOutput += Get-Content -Raw -LiteralPath $stderrPath
+              $engine = [regex]::Match($output, 'Windows PowerShell edition=Desktop version=(5\.1(?:\.\d+){0,2})(?:\s|$)')
+              return [pscustomobject]@{ exitCode = $code; records = $records; output = $output; allOutput = $allOutput; engine = $engine.Groups[1].Value }
+            } finally { Pop-Location }
+          }
+          $beforeBaseline = $null
+          $beforeCandidate = $null
+          try {
+            if ($env:RUNNER_OS -ne 'Windows' -or $env:RUNNER_ARCH -ne 'X64') { throw 'requires the native Windows x64 qualification runner' }
+            foreach ($binding in @(@($baseline, $env:BASELINE_COMMIT, $receipt.baselineProductionBlob), @($candidate, $env:CANDIDATE_COMMIT, $receipt.candidateProductionBlob))) {
+              if ((Invoke-CheckedGit $binding[0] @('rev-parse', 'HEAD')) -ne $binding[1]) { throw 'checkout HEAD mismatch' }
+              if ((Invoke-CheckedGit $binding[0] @('rev-parse', "HEAD:$productionPath")) -ne $binding[2]) { throw 'production Git blob mismatch' }
+              if (@(Invoke-CheckedGit $binding[0] @('status', '--porcelain')).Count -ne 0) { throw 'checkout is not initially clean' }
+            }
+            Copy-Item -LiteralPath (Join-Path $candidate $testPath) -Destination (Join-Path $baseline $testPath)
+            $testHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $candidate $testPath)).Hash.ToLowerInvariant()
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $baseline $testPath)).Hash.ToLowerInvariant() -ne $testHash) { throw 'test bytes differ' }
+            $baselineDelta = @(Invoke-CheckedGit $baseline @('diff', '--name-only'))
+            if ($baselineDelta.Count -ne 1 -or $baselineDelta[0] -ne $testPath) { throw 'baseline changed outside the copied test hook' }
+            $receipt.testSHA256 = $testHash
+            $receipt.baselineProductionSHA256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $baseline $productionPath)).Hash.ToLowerInvariant()
+            $receipt.candidateProductionSHA256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $candidate $productionPath)).Hash.ToLowerInvariant()
+            $beforeBaseline = Get-SourceSnapshot $baseline
+            $beforeCandidate = Get-SourceSnapshot $candidate
+            $beforeBaseline | Set-Content -Encoding utf8NoBOM (Join-Path $evidence 'baseline-source-before.json')
+            $beforeCandidate | Set-Content -Encoding utf8NoBOM (Join-Path $evidence 'candidate-source-before.json')
+            $old = Invoke-ProbeTest 'baseline' $baseline
+            $new = Invoke-ProbeTest 'candidate' $candidate
+            $receipt.baselineExit = $old.exitCode
+            $receipt.candidateExit = $new.exitCode
+            $receipt.baselineDesktop51Version = $old.engine
+            $receipt.candidateDesktop51Version = $new.engine
+            foreach ($result in @($old, $new)) {
+              if (-not $result.engine) { throw 'Desktop PowerShell 5.1 engine evidence missing' }
+              if (-not ($result.records | Where-Object { $_.Test -eq $name -and $_.Action -eq 'run' })) { throw 'exact test did not execute' }
+              if ($result.records | Where-Object { $_.Action -eq 'skip' }) { throw 'test was skipped' }
+              if ($result.records | Where-Object { $_.Test -and $_.Test -ne $name }) { throw 'unexpected test executed' }
+            }
+            if ($old.engine -ne $new.engine) { throw 'PowerShell engine changed between runs' }
+            if ($old.exitCode -eq 0 -or -not ($old.records | Where-Object { $_.Test -eq $name -and $_.Action -eq 'fail' })) { throw 'baseline did not fail the required test' }
+            if ($old.output -notmatch 'incomplete or non-native local Windows architecture evidence:' -or $old.output -notmatch 'local Windows evidence: v1\|unknown\|unknown\|unknown\|unknown') { throw 'baseline failure was not the expected incomplete tuple assertion' }
+            if ($old.allOutput -match 'panic:|test timed out|Windows PowerShell version:|requires Windows PowerShell Desktop 5\.1, got') { throw 'baseline setup, engine or timeout failure is not qualifying evidence' }
+            if ($new.exitCode -ne 0 -or -not ($new.records | Where-Object { $_.Test -eq $name -and $_.Action -eq 'pass' })) { throw 'candidate did not pass the exact test' }
+            if ($new.records | Where-Object { $_.Action -eq 'fail' }) { throw 'candidate contains a failed event' }
+            if ($new.output -notmatch 'local Windows evidence: v1\|amd64\|amd64\|amd64\|false(?:\s|$)') { throw 'candidate supported native x64 tuple missing' }
+            $receipt.candidateTuple = 'v1|amd64|amd64|amd64|false'
+            $receipt.expectedBaselineAssertion = 'incomplete or non-native local Windows architecture evidence'
+            $receipt.qualified = $true
+          } catch {
+            $receipt.failure = $_.Exception.Message
+            throw
+          } finally {
+            try {
+              if ($beforeBaseline -and $beforeCandidate) {
+                $afterBaseline = Get-SourceSnapshot $baseline
+                $afterCandidate = Get-SourceSnapshot $candidate
+                $afterBaseline | Set-Content -Encoding utf8NoBOM (Join-Path $evidence 'baseline-source-after.json')
+                $afterCandidate | Set-Content -Encoding utf8NoBOM (Join-Path $evidence 'candidate-source-after.json')
+                foreach ($label in @('baseline', 'candidate')) {
+                  $receipt["${label}SourceBeforeSHA256"] = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $evidence "$label-source-before.json")).Hash.ToLowerInvariant()
+                  $receipt["${label}SourceAfterSHA256"] = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $evidence "$label-source-after.json")).Hash.ToLowerInvariant()
+                }
+                $receipt.sourceUnchanged = ($beforeBaseline -ceq $afterBaseline -and $beforeCandidate -ceq $afterCandidate)
+                if (-not $receipt.sourceUnchanged) { throw 'source or index changed during test execution' }
+              } else { $receipt.sourceUnchanged = $false }
+            } catch {
+              $receipt.qualified = $false
+              $receipt.sourceFailure = $_.Exception.Message
+              throw
+            } finally {
+              $json = $receipt | ConvertTo-Json -Depth 8
+              $json | Set-Content -Encoding utf8NoBOM (Join-Path $evidence 'receipt.json')
+              Write-Host 'BEGIN qualification receipt'
+              Write-Host $json
+              Write-Host 'END qualification receipt'
+            }
+          }
