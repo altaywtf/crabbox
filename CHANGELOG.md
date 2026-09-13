@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- SSH: restore native Windows architecture checks under Windows PowerShell 5.1 by using supported unsigned 16-bit types.
+
 ## 0.56.0 - 2026-09-11
 
 ### Highlights
