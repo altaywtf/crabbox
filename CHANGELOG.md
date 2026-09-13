@@ -34,12 +34,19 @@
 
 ### Fixes
 
+- Share delegated command parsing so single shell strings execute correctly and literal operator arguments stay quoted across provider transports. [PR 2233](https://github.com/openclaw/crabbox/pull/2233).
+- Allow retained AWS image qualification when an AMI includes instance-store mappings beside its single EBS root, while preserving exact root identity, volume bounds, and borrowed-resource cleanup checks. [PR 2238](https://github.com/openclaw/crabbox/pull/2238). Thanks @vincentkoc.
+- Reject decoded negative Freestyle VM sizing, including explicit negative sizing flags, before backend construction rather than silently omitting it; preserve zero/default and positive-value handling. [PR 2235](https://github.com/openclaw/crabbox/pull/2235).
+- Preserve Anthropic Sandbox Runtime command cancellation and deadline causes in recorded run outcomes and timing without changing numeric exit codes or diagnostics. [PR 2229](https://github.com/openclaw/crabbox/pull/2229).
+- Reject non-finite Vercel Sandbox vCPU values during configuration validation instead of failing later while encoding a bridge request; preserve zero/service-default and supported fractional values. [PR 2230](https://github.com/openclaw/crabbox/pull/2230).
 - Disable Corepack downloads and automatic project pinning during package-manager preflight version probes, and suppress supported pnpm secondary version/lockfile management, without changing Corepack's project selection or the later workload's environment. [PR 2224](https://github.com/openclaw/crabbox/pull/2224).
 - Render XFCE clients in explicitly requested 8-bit desktops by selecting an 8-bit TrueColor visual, preserving the requested depth and fixed-size Xvfb/x11vnc backend. [PR 2222](https://github.com/openclaw/crabbox/pull/2222). Thanks @vincentkoc.
 - Use a private stdin pipe for WSL2 Python preflight completion and retirement checks, preserving program bytes without creating another staged workload. [PR 2217](https://github.com/openclaw/crabbox/pull/2217).
 - Preserve precommand cancellation and operational failure classifications in saved run timing and local history instead of reporting a workload exit. [PR 2217](https://github.com/openclaw/crabbox/pull/2217).
 - Bound artifact discovery to the possible match depth for canonical non-recursive wildcard patterns, preserving selection and recursive glob behavior. [PR 2214](https://github.com/openclaw/crabbox/pull/2214). Thanks @vincentkoc.
 - Match Linux portal desktops to the viewer window with controller-only resize requests, bounded collaboration requests, and a Fit opt-out; use resize-capable TigerVNC for new local-container and public-installer XFCE desktops, retire the stopped legacy exporter's failure marker on upgrade, preserve direct SSH's local-scaling default and the installer's 8-bit backend selection, and document existing 8-bit rendering and Wayland sizing limits. [PR 2075](https://github.com/openclaw/crabbox/pull/2075). Thanks @vincentkoc.
+
+- Validate documentation-site heading links against the renderer's shared heading identities, excluding fenced/commented pseudoheadings while preserving published IDs and separate repository-only anchor rules. [PR 2231](https://github.com/openclaw/crabbox/pull/2231).
 
 ## 0.58.0 - 2026-09-12
 

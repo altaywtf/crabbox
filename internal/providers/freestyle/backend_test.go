@@ -38,37 +38,40 @@ func TestFreestyleProviderSpec(t *testing.T) {
 	}
 }
 
-func TestFreestyleExecCommandPreservesShellString(t *testing.T) {
-	got := freestyleExecCommand([]string{"pnpm install && pnpm test"}, true)
-	want := "pnpm install && pnpm test"
-	if got != want {
-		t.Fatalf("command=%q want %q", got, want)
-	}
-}
-
-func TestFreestyleExecCommandQuotesImplicitShellArgv(t *testing.T) {
-	if got := freestyleExecCommand([]string{"go", "test", "./..."}, false); got != "'go' 'test' './...'" {
-		t.Fatalf("command=%q", got)
-	}
-	got := freestyleExecCommand([]string{"FOO=bar", "pnpm", "test"}, false)
-	if !strings.Contains(got, "FOO=") || !strings.Contains(got, "'pnpm'") {
-		t.Fatalf("command=%q", got)
-	}
-}
-
-func TestFreestyleExecCommandPreservesSpacedArguments(t *testing.T) {
-	got := freestyleExecCommand([]string{"echo", "hello world"}, false)
-	want := "'echo' 'hello world'"
-	if got != want {
-		t.Fatalf("command=%q want %q", got, want)
-	}
-}
-
-func TestFreestyleExecCommandPreservesSingleShellString(t *testing.T) {
-	got := freestyleExecCommand([]string{"echo hello from freestyle"}, false)
-	want := "echo hello from freestyle"
-	if got != want {
-		t.Fatalf("command=%q want %q", got, want)
+func TestFreestyleConfigureSizing(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		vcpus   int
+		memory  int
+		wantErr string
+	}{
+		{name: "defaults"},
+		{name: "cpu only", vcpus: 7},
+		{name: "memory only", memory: 7},
+		{name: "positive", vcpus: 7, memory: 3},
+		{name: "negative cpu", vcpus: -2, wantErr: "freestyle vcpus must be non-negative"},
+		{name: "negative memory", memory: -2, wantErr: "freestyle memoryGB must be non-negative"},
+		{name: "both negative", vcpus: -2, memory: -2, wantErr: "freestyle vcpus must be non-negative"},
+		{name: "negative cpu with memory", vcpus: -2, memory: 7, wantErr: "freestyle vcpus must be non-negative"},
+		{name: "negative memory with cpu", vcpus: 7, memory: -2, wantErr: "freestyle memoryGB must be non-negative"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.Config{Provider: "freestyle", Freestyle: core.FreestyleConfig{VCPUs: tc.vcpus, MemoryGB: tc.memory}}
+			backend, err := (Provider{}).Configure(cfg, core.Runtime{})
+			if tc.wantErr != "" {
+				var exitErr core.ExitError
+				if backend != nil || !errors.As(err, &exitErr) || exitErr.Code != 2 || err.Error() != tc.wantErr {
+					t.Fatalf("Configure backend=%T err=%v, want nil backend and exit 2: %s", backend, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := backend.(*freestyleBackend).cfg.Freestyle; got != cfg.Freestyle {
+				t.Fatalf("sizing changed: %#v want %#v", got, cfg.Freestyle)
+			}
+		})
 	}
 }
 
@@ -90,8 +93,8 @@ func TestFreestyleEnvExportCommandQuotesValuesOnly(t *testing.T) {
 func TestFreestyleExecForwardsEnvAfterWorkdir(t *testing.T) {
 	client := &fakeFreestyleClient{}
 	backend := &freestyleBackend{rt: core.Runtime{Stderr: io.Discard}}
-	code, err := backend.exec(context.Background(), client, "vm123", "/workspace/repo", []string{`echo "$GREETING"`}, false, map[string]string{
-		"GREETING": "hello world",
+	code, err := backend.exec(context.Background(), client, "vm123", "/workspace/repo", core.RunRequest{
+		Command: []string{`echo "$GREETING"`}, Env: map[string]string{"GREETING": "hello world"},
 	}, backend.rt.Stdout, backend.rt.Stderr)
 	if err != nil {
 		t.Fatal(err)

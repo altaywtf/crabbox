@@ -75,8 +75,18 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 			client, err = newAPI(b.cfg, b.rt)
 			return err
 		},
-		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
-			return b.prepareArchive(ctx, req)
+		Workspace: func() shared.SandboxWorkspace {
+			return shared.WorkspaceOperations{
+				PrepareArchiveFunc: func(ctx context.Context) (*core.PreparedArchive, error) {
+					return b.prepareArchive(ctx, req)
+				},
+				SyncFunc: func(ctx context.Context, archive *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+					return b.syncWorkspace(ctx, client, boxID, req, workdir, folder, archive)
+				},
+				EnsureFunc: func(ctx context.Context) error {
+					return b.prepareWorkspace(ctx, client, boxID, folder)
+				},
+			}
 		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			var box boxData
@@ -96,12 +106,6 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 				return shared.DelegatedSandbox{}, err
 			}
 			return session(), nil
-		},
-		Sync: func(ctx context.Context, archive *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			return b.syncWorkspace(ctx, client, boxID, req, workdir, folder, archive)
-		},
-		NoSync: func(ctx context.Context) error {
-			return b.prepareWorkspace(ctx, client, boxID, folder)
 		},
 		Command: func(ctx context.Context) (shared.DelegatedSandboxCommand, error) {
 			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
@@ -172,34 +176,30 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	return shared.PollDelegatedStatus(ctx, shared.DelegatedStatusRequest{
-		ID:          req.ID,
-		Provider:    providerName,
-		TargetOS:    targetLinux,
-		Network:     networkPublic,
-		Wait:        req.Wait,
-		WaitTimeout: req.WaitTimeout,
-		Now:         func() time.Time { return core.ClockNow(b.rt.Clock) },
-		Resolve: func(id string) (string, string, string, error) {
-			return b.resolveBoxID(ctx, client, id, "", false)
-		},
-		Get: func(getCtx context.Context, boxID string) (shared.DelegatedStatusResource, error) {
-			box, err := client.GetBox(getCtx, boxID)
-			if err != nil {
-				return shared.DelegatedStatusResource{}, err
-			}
-			server := boxToServer(b.cfg, box)
-			return shared.DelegatedStatusResource{
-				State:      box.Status,
-				ServerID:   box.ID,
-				ServerType: server.ServerType.Name,
-				Ready:      statusReady(box.Status),
-				Labels:     server.Labels,
-			}, nil
-		},
-		TimeoutError: func(boxID string) error {
-			return core.Exit(5, "timed out waiting for upstash-box %s to become ready", boxID)
-		},
+	leaseID, boxID, slug, err := b.resolveBoxID(ctx, client, req.ID, "", false)
+	if err != nil {
+		return core.StatusView{}, err
+	}
+	return shared.PollStatus(ctx, req, func() time.Time { return core.ClockNow(b.rt.Clock) }, func(ctx context.Context) (core.StatusView, bool, error) {
+		box, err := client.GetBox(ctx, boxID)
+		if err != nil {
+			return core.StatusView{}, false, err
+		}
+		server := boxToServer(b.cfg, box)
+		return core.StatusView{
+			ID:         leaseID,
+			Slug:       core.Blank(slug, server.Labels["slug"]),
+			Provider:   providerName,
+			TargetOS:   targetLinux,
+			Network:    networkPublic,
+			State:      box.Status,
+			ServerID:   box.ID,
+			ServerType: server.ServerType.Name,
+			Ready:      statusReady(box.Status),
+			Labels:     server.Labels,
+		}, false, nil
+	}, func() error {
+		return core.Exit(5, "timed out waiting for upstash-box %s to become ready", boxID)
 	})
 }
 
