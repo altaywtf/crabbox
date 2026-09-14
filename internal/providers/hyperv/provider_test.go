@@ -23,6 +23,52 @@ func TestMain(m *testing.M) {
 	os.Exit(testutil.RunWithIsolatedUserDirs(m))
 }
 
+func TestHyperVConfigShowSection(t *testing.T) {
+	for _, selected := range []string{"", "hyperv", "multipass"} {
+		for _, tc := range []struct {
+			name         string
+			raw          string
+			cpus, memory int
+			initPassword bool
+		}{
+			{name: "empty"},
+			{name: "raw", raw: " padded ", cpus: -2, memory: -7},
+			{name: "configured", raw: "configured", cpus: 4, memory: 8192, initPassword: true},
+		} {
+			t.Run(selected+"/"+tc.name, func(t *testing.T) {
+				cfg := core.Config{Provider: selected, HyperV: core.HyperVConfig{
+					Image: tc.raw, User: tc.raw, WorkRoot: tc.raw, Switch: tc.raw,
+					CPUs: tc.cpus, Memory: tc.memory, InitPassword: tc.initPassword,
+					GuestPassword: "synthetic-omission-marker",
+				}}
+				before := cfg
+				section := (Provider{}).ConfigShowSection(cfg)
+				got := map[string]any{}
+				var text []string
+				for _, field := range section.Fields {
+					got[field.JSONName] = field.JSONValue
+					text = append(text, field.TextName+"="+field.TextValue)
+				}
+				want := map[string]any{"image": tc.raw, "user": tc.raw, "workRoot": tc.raw, "cpus": tc.cpus, "memory": tc.memory, "switch": tc.raw, "initPassword": tc.initPassword}
+				wantText := fmt.Sprintf("image=%s user=%s work_root=%s cpus=%d memory=%d switch=%s init_password=%t", tc.raw, tc.raw, tc.raw, tc.cpus, tc.memory, tc.raw, tc.initPassword)
+				if section.JSONKey != "hyperv" || section.TextLabel != "hyperv" || !reflect.DeepEqual(section.Providers, []string{"hyperv"}) || len(section.Fields) != 7 || !reflect.DeepEqual(got, want) || strings.Join(text, " ") != wantText {
+					t.Fatal("unexpected Hyper-V projection roster, types, or values")
+				}
+				encoded, err := json.Marshal(section)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(string(encoded), cfg.HyperV.GuestPassword) {
+					t.Fatal("guest password entered the display projection")
+				}
+				if !reflect.DeepEqual(cfg, before) {
+					t.Fatal("projection mutated configuration")
+				}
+			})
+		}
+	}
+}
+
 type recordingRunner struct {
 	calls     []core.LocalCommandRequest
 	responses map[string]core.LocalCommandResult
@@ -1101,7 +1147,15 @@ func TestReleasePrunesClaimAndKeyWhenVMIsMissing(t *testing.T) {
 	const leaseID = "cbx_missing123456"
 	const name = "crabbox-missing-1234"
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
-	b := testBackend(runner)
+	inherited := testBackend(runner).cfg
+	inherited.TargetOS = core.TargetWindows
+	inherited.WindowsMode = core.WindowsModeNormal
+	inherited.HyperV.CPUs = -2
+	configured, err := (Provider{}).Configure(inherited, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	if err != nil {
+		t.Fatalf("configure existing-lease release with inherited sizing: %v", err)
+	}
+	b := configured.(*backend)
 	cfg := b.configForRun()
 	if _, _, err := core.EnsureTestboxKeyForConfig(cfg, leaseID); err != nil {
 		t.Fatalf("ensureTestboxKeyForConfig: %v", err)
@@ -1179,7 +1233,16 @@ func TestCleanupMissingClaimRemovesDeterministicStorage(t *testing.T) {
 
 	const leaseID = "cbx_cleanupmissing"
 	const name = "crabbox-cleanup-missing"
-	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	inherited := testBackend(runner).cfg
+	inherited.TargetOS = core.TargetWindows
+	inherited.WindowsMode = core.WindowsModeNormal
+	inherited.HyperV.Memory = -2
+	configured, err := (Provider{}).Configure(inherited, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	if err != nil {
+		t.Fatalf("configure existing-lease cleanup with inherited sizing: %v", err)
+	}
+	b := configured.(*backend)
 	cfg := b.configForRun()
 	claim := core.LeaseClaim{
 		LeaseID:       leaseID,
@@ -2124,5 +2187,84 @@ func TestInheritedWorkRootCallerContract(t *testing.T) {
 				t.Fatalf("whole config differs for roots=%q/%q explicit=%t: got=%#v want=%#v", tc.providerRoot, tc.genericRoot, explicit, cfg, want)
 			}
 		}
+	}
+}
+
+func TestHyperVDecodedSizing(t *testing.T) {
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+	for _, tc := range []struct {
+		name                              string
+		cpus, memory, wantCPU, wantMemory int
+		wantError                         string
+	}{
+		{"negative CPU", -1, 8192, -1, 8192, "hyperv.cpus must be zero or greater"},
+		{"negative memory", 4, -1, 4, -1, "hyperv.memory must be zero or greater"},
+		{"both negative", -2, -2, -2, -2, "hyperv.cpus must be zero or greater"},
+		{"zero defaults", 0, 0, 4, 8192, ""},
+		{"positive", 3, 1536, 3, 1536, ""},
+	} {
+		for _, source := range []string{"decoded", "flags"} {
+			t.Run(tc.name+"/"+source, func(t *testing.T) {
+				cfg := core.BaseConfig()
+				cfg.Provider = providerName
+				cfg.TargetOS = core.TargetWindows
+				cfg.WindowsMode = core.WindowsModeNormal
+				if source == "flags" {
+					fs := flag.NewFlagSet("sizing", flag.ContinueOnError)
+					values := registerFlags(fs, cfg)
+					if err := fs.Parse([]string{fmt.Sprintf("--hyperv-cpu=%d", tc.cpus), fmt.Sprintf("--hyperv-memory=%d", tc.memory)}); err != nil {
+						t.Fatal(err)
+					}
+					if err := applyFlags(&cfg, fs, values); err != nil {
+						t.Fatal(err)
+					}
+					if cfg.HyperV.CPUs != tc.wantCPU || cfg.HyperV.Memory != tc.wantMemory {
+						t.Fatalf("flag normalization lost sizing: %d/%d", cfg.HyperV.CPUs, cfg.HyperV.Memory)
+					}
+				} else {
+					cfg.HyperV.CPUs, cfg.HyperV.Memory = tc.cpus, tc.memory
+				}
+				runner := &recordingRunner{}
+				got, err := (Provider{}).Configure(cfg, core.Runtime{Exec: runner})
+				if err != nil {
+					t.Fatal(err)
+				}
+				configured := got.(*backend).cfg.HyperV
+				if configured.CPUs != tc.wantCPU || configured.Memory != tc.wantMemory {
+					t.Fatalf("Configure sizing = %d/%d", configured.CPUs, configured.Memory)
+				}
+				_, err = got.(*backend).Acquire(t.Context(), core.AcquireRequest{})
+				var exit core.ExitError
+				if tc.wantError != "" {
+					if !errors.As(err, &exit) || exit.Code != 2 || exit.Message != tc.wantError {
+						t.Fatalf("Acquire sizing: %v", err)
+					}
+				} else if !errors.As(err, &exit) || exit.Code != 2 || !strings.Contains(exit.Message, "requires --hyperv-image") {
+					t.Fatalf("valid sizing did not reach image validation: %v", err)
+				}
+				if len(runner.calls) != 0 {
+					t.Fatal("sizing or missing-image rejection dispatched a native command")
+				}
+			})
+		}
+	}
+}
+
+func TestHyperVUnselectedSizingFlagsRemainRaw(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = "unselected"
+	beforeTarget, beforeUser, beforeRoot := cfg.TargetOS, cfg.SSHUser, cfg.WorkRoot
+	fs := flag.NewFlagSet("sizing", flag.ContinueOnError)
+	values := registerFlags(fs, cfg)
+	if err := fs.Parse([]string{"--hyperv-cpu=-2", "--hyperv-memory=0"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HyperV.CPUs != -2 || cfg.HyperV.Memory != 0 || cfg.Provider != "unselected" || cfg.TargetOS != beforeTarget || cfg.SSHUser != beforeUser || cfg.WorkRoot != beforeRoot {
+		t.Fatal("unselected flags changed normalization contract")
 	}
 }

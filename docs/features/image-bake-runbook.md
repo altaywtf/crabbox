@@ -1155,8 +1155,9 @@ The workflow has separate trust zones:
 
 - `authorize` binds one first attempt to the protected default-branch workflow,
   open same-repository pull request, and exact candidate SHA. The pull request
-  base must equal the protected workflow SHA, so a stale candidate must be
-  rebased before qualification.
+  base must equal the protected workflow SHA. This checks the current pull
+  request base, not whether the candidate descends from that revision;
+  candidate compatibility is checked against the protected build inputs below.
 - `build-candidate` is a credentialless job in that protected workflow. It uses
   the protected revision's Go version, Worker lockfile, Wrangler binary, config,
   and other non-source build inputs. Candidate Go modules and non-source Worker
@@ -1166,12 +1167,19 @@ The workflow has separate trust zones:
   input digests before publishing the one-day manifest-covered artifact. Later
   jobs accept only that artifact ID and digest from the current first-attempt
   protected workflow run.
-- `admit` runs without cloud credentials before environment approval. Trusted
-  tooling verifies the exact artifact manifest and rejects publishers that do
-  not implement injectable CLI delegation, pre-promotion candidate teardown,
-  transactional promotion receipts, compare-and-swap rollback, and failed
-  revision retirement in the required order.
-- `deploy-enroll` is environment-protected. It checks out only protected
+- `admit` requires protected environment approval before starting the immutable
+  qualification clock. Without AWS, Cloudflare API, or controller credentials,
+  trusted tooling verifies the artifact manifest and rejects publishers that
+  lack injectable CLI delegation, pre-promotion candidate teardown,
+  transactional promotion receipts, compare-and-swap rollback, or failed
+  revision retirement in the required order. It publishes the identity and
+  deadline handoff, with private configuration bound only by its digest.
+  Retained mode also publishes the exact IAM input projection.
+- `deploy-enroll` requires separate environment approval after the operator
+  verifies exact IAM binding, authority credential custody, and independent
+  cleanup ownership. It consumes the prepared handoff without extending its
+  expiry; preparation, approvals, and uploads all consume that same window.
+  It checks out only protected
   tooling, downloads the exact artifact ID into runner temporary storage,
   revalidates every manifest entry and the admission contract, treats the
   candidate bundle as data, deploys through the Cloudflare API, reads the
