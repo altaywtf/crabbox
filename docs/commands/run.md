@@ -1163,3 +1163,11 @@ Run-specific flags:
 --timing-record default|off|path
 --record-local
 ```
+
+## Native JJ source
+
+`--sync-source jj` selects live JJ working files. Add `--sync-revision <revision>`
+for a recorded native tree. Preparation completes before acquisition and transfer
+uses immutable staging. `--no-sync` leaves these settings inactive. See
+[Sync](../features/sync.md#jujutsu-workspaces) for the required companion and current
+transport/metadata-owner restrictions.
