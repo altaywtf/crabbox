@@ -45,6 +45,9 @@ cargo build --locked --offline -p jj-cli --bin crabbox-jj-source \
 The helper is a production binary under `cli/src/bin/crabbox-jj-source`, not a
 Cargo example. Example builds activate the CLI's self dev-dependency and testing
 features; do not use `--example`, tests or `--all-targets` for release inputs.
+The pinned CLI dependency explicitly enables Tokio's `net` feature for its I/O
+runtime initializer; Unix process support alone does not supply that API on
+Windows. The helper's requested package feature remains `git`.
 
 `--offline` requires the locked Cargo dependencies to be cached first. Release
 optimization and cross-target compilation use Cargo's normal flags; a source
@@ -116,7 +119,7 @@ authenticate arbitrary software supplied by an untrusted local writer. Release
 signing, published-artifact verification, notices, and native platform acceptance
 remain separate requirements.
 
-Run the portable ordinary-file smoke with a separately built stock JJ executable
+Run the portable source smoke with a separately built stock JJ executable
 and a candidate CLI installed beside its native companion pair:
 
 ```sh
@@ -124,20 +127,24 @@ node tools/jj-source/smoke.mjs --jj /path/to/stock/jj \
   --crabbox /path/to/installed/crabbox --output /path/to/new-smoke-directory
 ```
 
-It creates a disposable non-colocated workspace, reads live and recorded
-inventories, exports recorded UTF-8 bytes, and checks recorded and live installed
-CLI plans with ordinary working-file changes. All source and administration-file
-identities must remain unchanged during reads. The output retains the synthetic
-fixture and a receipt with binary identities and observed export capabilities.
-This smoke does not establish executable/symlink behavior, remote SSH lifecycle,
-signing, or release acceptance; run those separate platform fixtures too.
+It creates a disposable non-colocated workspace with UTF-8 files, a recorded
+executable, and a relative symlink. A stock JJ checkout supplies the host-native
+materialization oracle: recorded export must match its bytes, kinds, link targets,
+and modes, with native Windows attributes recorded and compared on Windows.
+Recorded and live installed CLI plans are checked after ordinary working-file
+changes. Source/admin contents, kinds, modes, and last-write timestamps must remain
+unchanged during reads. The output retains the synthetic fixture and receipts;
+reported capability limits do not silently skip paths. This smoke does not
+establish remote SSH lifecycle, signing, or full release acceptance.
 
 The `Native JJ Qualification` workflow runs six native Darwin/Linux/Windows
 architecture combinations on pull requests that change the source or CLI. It
 uses `qualify.mjs --target OS_ARCH --output NEW_DIRECTORY` to prepare the pinned
-source, fetch locked dependencies, run the focused Rust test, build stock JJ for
-the fixture, produce the companion bundle, and run the ordinary-file smoke with a
-fresh native CLI. Node, hardware, Rust host, Go host/target, and Windows compiler
+source, fetch locked dependencies, run the focused Rust test, build pristine stock
+JJ from the original pinned archive, produce the companion bundle, and run the
+source smoke with a fresh native CLI. The stock oracle uses `git,tokio/net`
+without candidate patches; its source and build features are recorded separately.
+Node, hardware, Rust host, Go host/target, and Windows compiler
 selection are checked rather than inferred from runner labels. The workflow
 retains a permission-preserving bundle archive and bounded receipts, not private
 Cargo metadata or credential-bearing runner state. It does not publish releases

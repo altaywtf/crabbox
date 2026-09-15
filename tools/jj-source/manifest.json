@@ -15,7 +15,7 @@
   "patches": {
     "jj": {
       "path": "patches/jj.patch",
-      "sha256": "fe57b3d5e4398d737d2de8b9589b83b87a1e64b77a0e918c1096e8fe3f97ae96"
+      "sha256": "8954a4e27807fab985d17bc6fa75ccb2b192167ffe8b7210ff45a66510fb7b81"
     },
     "gix": {
       "path": "patches/gix.patch",
@@ -51,7 +51,7 @@
   ],
   "sourceTree": {
     "algorithm": "sha256-jsonl-files-v1",
-    "sha256": "a7c57c2fe17a0905f1f17095cb8f89b6eade3891238447f7a0f74b69cbf7fd65",
+    "sha256": "0e0f4b40d964d5a67b0698aa165f6e03e49553b3527cdb3a2abc2a51e8777bb6",
     "entryCount": 924
   }
 }

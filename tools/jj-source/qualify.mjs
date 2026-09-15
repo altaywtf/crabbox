@@ -11,7 +11,7 @@ import { parseArgs } from 'node:util';
 import { spawnSync } from 'node:child_process';
 import { nativeTargets, fileSHA256, newOutputOutside } from './artifacts.mjs';
 import { nativeBuildEnvironment } from './build.mjs';
-import { materialize, verifyPreparedSource } from './materialize.mjs';
+import { materialize, verifyPreparedSource, sourceTree } from './materialize.mjs';
 import { produce } from './produce.mjs';
 import { smoke } from './smoke.mjs';
 
@@ -59,16 +59,28 @@ export async function qualify({ target: key, output, jjArchive, gixArchive }) {
     await pipeline(Readable.fromWeb(response.body), createWriteStream(destination, { flags: 'wx', mode: 0o600 }));
     return destination;
   };
+  jjArchive = await archive(jjArchive, 'jj.tar.gz', manifest.jj.archiveUrl);
+  gixArchive = await archive(gixArchive, 'gix.crate', manifest.gix.archiveUrl);
   const source = path.join(output, 'source');
   const prepared = await materialize({ output: source, inventoryFile: path.join(output, 'source-inventory.json'),
-    jjArchive: await archive(jjArchive, 'jj.tar.gz', manifest.jj.archiveUrl),
-    gixArchive: await archive(gixArchive, 'gix.crate', manifest.gix.archiveUrl) });
+    jjArchive, gixArchive });
   const cargoArgs = ['--locked', '--offline', '--manifest-path', path.join(source, 'Cargo.toml'),
     '-p', 'jj-cli', '--no-default-features', '--features', 'git', '--target', target.targetTriple];
   // Network access is limited to dependency preparation; builds remain offline.
   run('cargo', ['fetch', '--locked', '--manifest-path', path.join(source, 'Cargo.toml'), '--target', target.targetTriple], source, true);
   run('cargo', ['test', ...cargoArgs, '--bin', 'crabbox-jj-source', 'object_ceiling_tests', '--', '--nocapture'], source, true);
-  run('cargo', ['build', ...cargoArgs, '--bin', 'jj'], source, true);
+  // The metadata oracle must not share the candidate's JJ/gix patches.
+  const stockSource = path.join(output, 'stock-source');
+  assert.equal(await fileSHA256(jjArchive), manifest.jj.archiveSha256);
+  await fs.mkdir(stockSource);
+  run('tar', ['-xzf', jjArchive, '--strip-components=1', '-C', stockSource]);
+  assert.equal(await fileSHA256(jjArchive), manifest.jj.archiveSha256);
+  const stockSourceTree = await sourceTree(stockSource);
+  const stockCargo = ['--manifest-path', path.join(stockSource, 'Cargo.toml'), '--target', target.targetTriple];
+  run('cargo', ['fetch', '--locked', ...stockCargo], stockSource, true);
+  const stockFeatures = ['git', 'tokio/net'];
+  run('cargo', ['build', '--locked', '--offline', ...stockCargo, '-p', 'jj-cli', '--bin', 'jj', '--no-default-features', '--features', stockFeatures.join(',')], stockSource, true);
+  assert.deepEqual(await sourceTree(stockSource), stockSourceTree);
   const stockJJ = path.join(targetDirectory, target.targetTriple, 'debug', `jj${target.targetOS === 'windows' ? '.exe' : ''}`);
   await verifyPreparedSource(source, manifest);
   const produced = await produce({ source, output: path.join(output, 'production') });
@@ -79,8 +91,9 @@ export async function qualify({ target: key, output, jjArchive, gixArchive }) {
   run('go', ['build', '-trimpath', '-o', cli, './cmd/crabbox'], repository, true);
   const runtime = await smoke({ jj: stockJJ, crabbox: cli, output: path.join(output, 'smoke') });
   const receipt = { schemaVersion: 1, target: key, architecture, prepared, artifact: produced.artifact,
-    stockJJSHA256: await fileSHA256(stockJJ), runtime,
-    scope: 'Native ordinary-file qualification and focused Rust test; not executable/symlink, SSH lifecycle, licensing, signing or full release acceptance.' };
+    stockJJSHA256: await fileSHA256(stockJJ), stockJJSource: { commit: manifest.jj.commit,
+      archiveSHA256: manifest.jj.archiveSha256, tree: stockSourceTree, patched: false, features: stockFeatures }, runtime,
+    scope: 'Native file/executable/symlink materialization versus pristine stock JJ and focused Rust test; not SSH lifecycle, licensing, signing or full release acceptance.' };
   await fs.writeFile(path.join(output, 'qualification.json'), JSON.stringify(receipt, null, 2) + '\n', { flag: 'wx' });
   // Keep permissions inside the archive when Actions transports the bundle.
   // macOS tar otherwise adds AppleDouble metadata outside the four-file contract.
