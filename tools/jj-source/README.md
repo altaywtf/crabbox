@@ -51,7 +51,9 @@ optimization and cross-target compilation use Cargo's normal flags; a source
 receipt is not a signing, native-platform, or bit-for-bit binary reproducibility
 claim. The source-tree digest covers sorted UTF-8 relative file paths and file
 content hashes plus upstream symlink targets, not host filesystem modes or
-timestamps. Archive extraction must preserve those upstream symlinks.
+timestamps. File paths and symlink targets encode native separators as `/`
+without resolving the targets. Archive extraction must preserve those upstream
+symlinks.
 
 Run the materializer integration test with the same downloaded archives:
 

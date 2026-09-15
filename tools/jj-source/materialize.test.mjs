@@ -3,7 +3,7 @@ import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { materialize, isolatedGitConfig } from './materialize.mjs';
+import { materialize, isolatedGitConfig, sourceDigestPath } from './materialize.mjs';
 import { buildHomes, nativeBuildEnvironment, productionBuildUnits } from './build.mjs';
 import { produce } from './produce.mjs';
 import { spawnSync } from 'node:child_process';
@@ -13,6 +13,12 @@ import { writeNativeNotices } from '../../scripts/test-support/native-artifacts.
 const jjArchive = process.env.CRABBOX_TEST_JJ_ARCHIVE;
 const gixArchive = process.env.CRABBOX_TEST_GIX_ARCHIVE;
 const nativeBinaries = process.env.CRABBOX_TEST_NATIVE_BINARY_DIR;
+
+test('source identity encodes native path separators without resolving link targets', () => {
+  assert.equal(sourceDigestPath('..\\..\\GOVERNANCE.md', '\\'), '../../GOVERNANCE.md');
+  assert.equal(sourceDigestPath('../cli/src/config-schema.json', '/'), '../cli/src/config-schema.json');
+  assert.equal(sourceDigestPath('literal\\name', '/'), 'literal\\name');
+});
 
 test('Git configuration isolation uses an owned empty file', () => {
   const empty = path.join(os.tmpdir(), 'owned-empty-git-config');

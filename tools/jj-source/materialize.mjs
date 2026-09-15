@@ -48,15 +48,19 @@ function command(name, args, cwd, emptyConfig) {
   if (result.status !== 0) throw new Error(`${name} failed (${result.status}): ${result.stderr.trim()}`);
 }
 
+export function sourceDigestPath(value, separator = path.sep) {
+  return value.split(separator).join('/');
+}
+
 export async function sourceTree(root, { includeEntries = false } = {}) {
   const files = [];
   async function walk(directory) {
     for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
       const full = path.join(directory, entry.name);
-      const relative = path.relative(root, full).split(path.sep).join('/');
+      const relative = sourceDigestPath(path.relative(root, full));
       if (entry.isDirectory()) await walk(full);
       else if (entry.isFile()) files.push([relative, 'file', await digest(full)]);
-      else if (entry.isSymbolicLink()) files.push([relative, 'symlink', await fs.readlink(full)]);
+      else if (entry.isSymbolicLink()) files.push([relative, 'symlink', sourceDigestPath(await fs.readlink(full))]);
       else throw new Error(`unsupported prepared source entry: ${relative}`);
     }
   }
