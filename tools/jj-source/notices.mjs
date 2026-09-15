@@ -59,8 +59,12 @@ function tar(args, limit) {
   return result.stdout;
 }
 
+export function archiveListingNames(listing) {
+  return listing.split(/\r?\n/).filter(Boolean);
+}
+
 export function parseArchiveMembers(listing, prefix) {
-  const names = listing.split(/\r?\n/).filter(Boolean);
+  const names = archiveListingNames(listing);
   const files = [];
   for (const name of names) {
     if (name.endsWith('/')) continue;

@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import crypto from 'node:crypto';
-import { lockedPackages, attributionPath, hasCurrentAttribution, parseArchiveMembers, renderNotices, collectNotices } from './notices.mjs';
+import { lockedPackages, attributionPath, hasCurrentAttribution, archiveListingNames, parseArchiveMembers, renderNotices, collectNotices } from './notices.mjs';
 import { verifyNoticeBundle, noticeName, attributionName } from './notice-artifacts.mjs';
 
 test('Cargo-generated lock identities distinguish registry and prepared packages', () => {
@@ -35,6 +35,8 @@ test('archive listings accept native line endings without trimming member names'
   for (const newline of ['\n', '\r\n']) {
     const listing = ['example-1.0.0/', 'example-1.0.0/LICENSE-MIT ', 'example-1.0.0/README.md', ''].join(newline);
     assert.deepEqual(parseArchiveMembers(listing, 'example-1.0.0'), ['LICENSE-MIT ', 'README.md']);
+    const bundle = ['attribution.json', 'crabbox-jj-source.NOTICES.txt', 'crabbox-jj-source.exe', 'crabbox-jj-source.json'];
+    assert.deepEqual(archiveListingNames((bundle.join(newline) + newline).trim()), bundle);
   }
 });
 

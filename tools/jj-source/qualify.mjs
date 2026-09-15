@@ -14,7 +14,7 @@ import { nativeBuildEnvironment } from './build.mjs';
 import { materialize, verifyPreparedSource, sourceTree } from './materialize.mjs';
 import { produce } from './produce.mjs';
 import { smoke } from './smoke.mjs';
-import { archiveMembers, archiveFile, attributionPath } from './notices.mjs';
+import { archiveMembers, archiveFile, archiveListingNames, attributionPath } from './notices.mjs';
 
 const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 const repository = path.resolve(packageRoot, '../..');
@@ -109,7 +109,7 @@ export async function qualify({ target: key, output, jjArchive, gixArchive }) {
   const members = (await fs.readdir(produced.bundle)).sort();
   const archivePath = path.join(output, 'native-bundle.tar');
   run('tar', ['-cf', archivePath, ...members], produced.bundle);
-  assert.deepEqual(run('tar', ['-tf', archivePath]).split('\n').sort(), members);
+  assert.deepEqual(archiveListingNames(run('tar', ['-tf', archivePath])).sort(), members);
   return receipt;
 }
 
