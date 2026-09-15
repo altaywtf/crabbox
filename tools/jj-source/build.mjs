@@ -45,6 +45,20 @@ export function buildHomes(environment = process.env, home = os.homedir(), cwd =
   };
 }
 
+export function nativeBuildEnvironment({ home, temp, targetDirectory }, environment = process.env) {
+  const env = {};
+  for (const name of ['PATH', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT', 'INCLUDE', 'LIB', 'LIBPATH', 'VCINSTALLDIR', 'VSINSTALLDIR', 'VCToolsInstallDir', 'WindowsSdkDir', 'WindowsSDKVersion', 'UCRTVersion', 'UniversalCRTSdkDir']) {
+    if (environment[name] !== undefined) env[name] = environment[name];
+  }
+  return Object.assign(env, buildHomes(environment), {
+    HOME: home, USERPROFILE: home, XDG_CONFIG_HOME: home,
+    APPDATA: path.join(home, 'AppData', 'Roaming'), LOCALAPPDATA: path.join(home, 'AppData', 'Local'),
+    JJ_CONFIG: path.join(home, 'jj.toml'), TMPDIR: temp, TMP: temp, TEMP: temp,
+    CARGO_TARGET_DIR: targetDirectory, CARGO_BUILD_JOBS: '4', CARGO_PROFILE_DEV_DEBUG: '0',
+    LC_ALL: 'C',
+  });
+}
+
 export async function build({ source, output, profile = 'release' }) {
   if (!['dev', 'release'].includes(profile)) throw new Error('profile must be dev or release');
   const target = nativeTarget(process.platform === 'win32' ? 'windows' : process.platform, process.arch === 'x64' ? 'amd64' : process.arch);
@@ -71,17 +85,7 @@ export async function build({ source, output, profile = 'release' }) {
     await fs.mkdir(home);
     await fs.mkdir(temp);
     await fs.writeFile(path.join(home, 'jj.toml'), '');
-    const env = {};
-    for (const name of ['PATH', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT', 'INCLUDE', 'LIB', 'LIBPATH', 'VCINSTALLDIR', 'VSINSTALLDIR', 'VCToolsInstallDir', 'WindowsSdkDir', 'WindowsSDKVersion', 'UCRTVersion', 'UniversalCRTSdkDir']) {
-      if (process.env[name] !== undefined) env[name] = process.env[name];
-    }
-    Object.assign(env, buildHomes(), {
-      HOME: home, USERPROFILE: home, XDG_CONFIG_HOME: home,
-      APPDATA: path.join(home, 'AppData', 'Roaming'), LOCALAPPDATA: path.join(home, 'AppData', 'Local'),
-      JJ_CONFIG: path.join(home, 'jj.toml'), TMPDIR: temp, TMP: temp, TEMP: temp,
-      CARGO_TARGET_DIR: path.join(owned, 'target'), CARGO_BUILD_JOBS: '4', CARGO_PROFILE_DEV_DEBUG: '0',
-      LC_ALL: 'C',
-    });
+    const env = nativeBuildEnvironment({ home, temp, targetDirectory: path.join(owned, 'target') });
     const rustc = run('rustc', ['--version'], home, env);
     const cargo = run('cargo', ['--version'], home, env);
     run('go', ['version'], home, { ...env, GOENV: 'off', GOTOOLCHAIN: 'local' });

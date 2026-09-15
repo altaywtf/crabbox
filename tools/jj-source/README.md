@@ -128,6 +128,17 @@ fixture and a receipt with binary identities and observed export capabilities.
 This smoke does not establish executable/symlink behavior, remote SSH lifecycle,
 signing, or release acceptance; run those separate platform fixtures too.
 
+The `Native JJ Qualification` workflow runs six native Darwin/Linux/Windows
+architecture combinations on pull requests that change the source or CLI. It
+uses `qualify.mjs --target OS_ARCH --output NEW_DIRECTORY` to prepare the pinned
+source, fetch locked dependencies, run the focused Rust test, build stock JJ for
+the fixture, produce the companion bundle, and run the ordinary-file smoke with a
+fresh native CLI. Node, hardware, Rust host, Go host/target, and Windows compiler
+selection are checked rather than inferred from runner labels. The workflow
+retains a permission-preserving bundle archive and bounded receipts, not private
+Cargo metadata or credential-bearing runner state. It does not publish releases
+or replace the separate lifecycle, attribution, and signing gates.
+
 The resulting `crabbox-jj-source` speaks the versioned protocol used by the Go
 adapter. The installed-sibling checker, environment projection and candidate plan/run
 routing are implemented, with native macOS source/SSH lifecycle proof and

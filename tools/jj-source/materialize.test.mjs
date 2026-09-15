@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { materialize } from './materialize.mjs';
-import { buildHomes, productionBuildUnits } from './build.mjs';
+import { buildHomes, nativeBuildEnvironment, productionBuildUnits } from './build.mjs';
 import { produce } from './produce.mjs';
 import { spawnSync } from 'node:child_process';
 import { nativeTargets, nativeTarget, fileSHA256, createBuildReceipt, verifyPair, verifyReleaseInputs, verifyReleaseBundle, assembleReleaseBundle, stageReleaseInputs, finalizeDarwinReleaseBundle, receiptName } from './artifacts.mjs';
@@ -43,6 +43,21 @@ test('build keeps original default and configured toolchain homes before isolati
   assert.deepEqual(buildHomes({ CARGO_HOME: 'cargo-cache', RUSTUP_HOME: path.join(home, 'rust-toolchains') }, home, cwd), {
     CARGO_HOME: path.join(cwd, 'cargo-cache'), RUSTUP_HOME: path.join(home, 'rust-toolchains'),
   });
+  const isolated = path.join(os.tmpdir(), 'isolated-home');
+  const temp = path.join(isolated, 'tmp');
+  const targetDirectory = path.join(isolated, 'target');
+  const env = nativeBuildEnvironment({ home: isolated, temp, targetDirectory }, {
+    PATH: '/native/tools', CARGO_HOME: path.join(home, '.cargo'), RUSTUP_HOME: path.join(home, '.rustup'),
+    INCLUDE: 'native-headers', LIB: 'native-libraries', UNRELATED_SETTING: 'not inherited',
+  });
+  assert.equal(env.HOME, isolated);
+  assert.equal(env.CARGO_HOME, path.join(home, '.cargo'));
+  assert.equal(env.RUSTUP_HOME, path.join(home, '.rustup'));
+  assert.equal(env.CARGO_TARGET_DIR, targetDirectory);
+  assert.equal(env.TEMP, temp);
+  assert.equal(env.INCLUDE, 'native-headers');
+  assert.equal(env.LIB, 'native-libraries');
+  assert.equal(env.UNRELATED_SETTING, undefined);
 });
 
 test('production build inventory retains observed fresh and newly built artifacts', () => {
