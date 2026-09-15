@@ -118,6 +118,9 @@ The receipt detects installation mismatches. It is not a signature and does not
 authenticate arbitrary software supplied by an untrusted local writer. Release
 signing, published-artifact verification, notices, and native platform acceptance
 remain separate requirements.
+Protocol paths use the compatible native spelling for ordinary canonical Windows
+roots. Paths that cannot be safely simplified retain their spelling, and the
+managed-state transfer guard continues to reject unsupported device paths.
 
 Run the portable source smoke with a separately built stock JJ executable
 and a candidate CLI installed beside its native companion pair:
@@ -152,9 +155,10 @@ selection are checked rather than inferred from runner labels. The workflow
 retains a permission-preserving bundle archive and bounded receipts, not private
 Cargo metadata or credential-bearing runner state. It does not publish releases
 or replace the separate lifecycle, attribution, and signing gates.
-On preparation failure, qualification retains architecture facts and, when
+On failure, qualification retains architecture facts and, when
 available, a relative-path/file-digest inventory of the pinned source for
-comparison across hosts. The source identity check still fails and removes its
+comparison across hosts, plus the synthetic smoke's captured context/export
+responses. Failed source identity checks still remove their
 new source directory; diagnostics do not authorize mismatched build inputs.
 
 The resulting `crabbox-jj-source` speaks the versioned protocol used by the Go

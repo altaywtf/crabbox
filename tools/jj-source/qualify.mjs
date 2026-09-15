@@ -76,7 +76,7 @@ export async function qualify({ target: key, output, jjArchive, gixArchive }) {
     '-p', 'jj-cli', '--no-default-features', '--features', 'git', '--target', target.targetTriple];
   // Network access is limited to dependency preparation; builds remain offline.
   run('cargo', ['fetch', '--locked', '--manifest-path', path.join(source, 'Cargo.toml'), '--target', target.targetTriple], source, true);
-  run('cargo', ['test', ...cargoArgs, '--bin', 'crabbox-jj-source', 'object_ceiling_tests', '--', '--nocapture'], source, true);
+  run('cargo', ['test', ...cargoArgs, '--bin', 'crabbox-jj-source', 'source_tests', '--', '--nocapture'], source, true);
   // The metadata oracle must not share the candidate's JJ/gix patches.
   const stockSource = path.join(output, 'stock-source');
   assert.equal(await fileSHA256(jjArchive), manifest.jj.archiveSha256);

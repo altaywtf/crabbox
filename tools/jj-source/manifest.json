@@ -41,7 +41,7 @@
     {
       "path": "helper/main.rs",
       "target": "cli/src/bin/crabbox-jj-source/main.rs",
-      "sha256": "2cda481256c702c5a428f14edf791b475bfd862a47edb2f8b487f756fff8fd9f"
+      "sha256": "ed50b20593dd90889bd02d8c9b968423647d0431ccce07c708ae077a083e119b"
     },
     {
       "path": "helper/protocol.rs",
@@ -51,7 +51,7 @@
   ],
   "sourceTree": {
     "algorithm": "sha256-jsonl-files-v1",
-    "sha256": "0e0f4b40d964d5a67b0698aa165f6e03e49553b3527cdb3a2abc2a51e8777bb6",
+    "sha256": "c4f65bf3b4af6dcd1d60f68eb16c883a6975b86d25aa479ba2fbc1f45c6355df",
     "entryCount": 924
   }
 }

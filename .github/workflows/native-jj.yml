@@ -113,5 +113,7 @@ jobs:
           path: |
             ${{ runner.temp }}/native-jj/architecture.json
             ${{ runner.temp }}/native-jj/source-inventory.json
+            ${{ runner.temp }}/native-jj/smoke/context.json
+            ${{ runner.temp }}/native-jj/smoke/export.json
           if-no-files-found: warn
           retention-days: 14

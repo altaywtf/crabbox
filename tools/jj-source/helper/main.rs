@@ -76,7 +76,10 @@ struct ExportArgs {
 }
 
 fn utf8_path(path: &Path) -> Result<String, CommandError> {
-    path.to_str()
+    // Keep ordinary Windows roots compatible with consumers without rewriting
+    // paths that cannot be represented safely in the ordinary namespace.
+    dunce::simplified(path)
+        .to_str()
         .map(str::to_owned)
         .ok_or_else(|| user_error("native source path is not UTF-8"))
 }
@@ -574,8 +577,21 @@ fn main() -> std::process::ExitCode {
 }
 
 #[cfg(test)]
-mod object_ceiling_tests {
+mod source_tests {
     use std::io::Write as _;
+
+    #[test]
+    fn protocol_reports_ordinary_paths_in_compatible_form() {
+        let (input, expected) = if cfg!(windows) {
+            (r"\\?\C:\fixture\source", r"C:\fixture\source")
+        } else {
+            ("/fixture/source", "/fixture/source")
+        };
+        assert_eq!(
+            super::utf8_path(std::path::Path::new(input)).unwrap(),
+            expected
+        );
+    }
 
     #[test]
     fn caller_ceiling_preserves_native_and_reduced_trust_limits() {

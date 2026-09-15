@@ -125,6 +125,7 @@ export async function smoke({ jj, crabbox, output }) {
   const version = read('source-version');
   verifySourceVersion(version);
   const context = read('source-context');
+  await fs.writeFile(path.join(output, 'context.json'), JSON.stringify(context, null, 2) + '\n', { flag: 'wx' });
   const inventory = read('--at-op', context.operation_heads[0], 'source-recorded-inventory', '--revision', 'native-smoke');
   assert.equal(inventory.identity.commit, commit);
   assert.deepEqual(inventory.entries.map((item) => item.path).sort(), paths);
@@ -140,6 +141,7 @@ export async function smoke({ jj, crabbox, output }) {
   const exported = read('--at-op', inventory.identity.operation, 'source-recorded-export',
     '--selected', selected, '--output', payload, '--state', checkout,
     '--max-entry-bytes', '1048576', '--max-output-bytes', '1048576');
+  await fs.writeFile(path.join(output, 'export.json'), JSON.stringify(exported, null, 2) + '\n', { flag: 'wx' });
   assert.deepEqual(exported.identity, inventory.identity);
   assert.deepEqual((await fs.readdir(payload)).sort(), ['data', 'recorded.txt', 'tool.sh', 'value-link']);
   assert.deepEqual(await fs.readdir(path.join(payload, 'data')), ['value.txt']);
