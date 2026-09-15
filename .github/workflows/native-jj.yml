@@ -115,5 +115,9 @@ jobs:
             ${{ runner.temp }}/native-jj/source-inventory.json
             ${{ runner.temp }}/native-jj/smoke/context.json
             ${{ runner.temp }}/native-jj/smoke/export.json
+            ${{ runner.temp }}/native-jj/smoke/recorded-plan.json
+            ${{ runner.temp }}/native-jj/smoke/live-plan.json
+            ${{ runner.temp }}/native-jj/smoke/recorded-file-info.json
+            ${{ runner.temp }}/native-jj/smoke/live-file-info.json
           if-no-files-found: warn
           retention-days: 14

@@ -135,7 +135,11 @@ executable, and a relative symlink. A stock JJ checkout supplies the host-native
 materialization oracle: recorded export must match its bytes, kinds, link targets,
 and modes, with native Windows attributes recorded and compared on Windows.
 Recorded and live installed CLI plans are checked after ordinary working-file
-changes. Source/admin contents, kinds, modes, and last-write timestamps must remain
+changes. The smoke requires Go to build a standard-library-only file-info oracle:
+plan size estimates must match Go's native `Lstat` sizes on the stock checkout
+and live files, separately from exact content and symlink-target checks. Node's
+libuv uses symlink-target lengths on Windows, unlike Go's filesystem size field.
+Source/admin contents, kinds, modes, and last-write timestamps must remain
 unchanged during reads. The output retains the synthetic fixture and receipts;
 reported capability limits do not silently skip paths. This smoke does not
 establish remote SSH lifecycle, signing, or full release acceptance.
@@ -158,7 +162,7 @@ or replace the separate lifecycle, attribution, and signing gates.
 On failure, qualification retains architecture facts and, when
 available, a relative-path/file-digest inventory of the pinned source for
 comparison across hosts, plus the synthetic smoke's captured context/export
-responses. Failed source identity checks still remove their
+responses, plans, and native file-size observations. Failed source identity checks still remove their
 new source directory; diagnostics do not authorize mismatched build inputs.
 
 The resulting `crabbox-jj-source` speaks the versioned protocol used by the Go

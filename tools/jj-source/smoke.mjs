@@ -52,12 +52,25 @@ export async function smoke({ jj, crabbox, output }) {
   Object.assign(env, isolatedGitConfig(emptyGitConfig), { HOME: home, USERPROFILE: home, APPDATA: home, LOCALAPPDATA: home,
     XDG_CONFIG_HOME: home, XDG_CACHE_HOME: path.join(output, 'cache'),
     XDG_STATE_HOME: path.join(output, 'state'), JJ_CONFIG: config,
+    GOENV: 'off', GOWORK: 'off', GOTOOLCHAIN: 'local',
     TMPDIR: temp, TEMP: temp, TMP: temp, LANG: 'C', LC_ALL: 'C' });
   const run = (binary, args, cwd = source) => {
     const result = spawnSync(binary, args, { cwd, env, encoding: 'utf8', timeout: 180_000, maxBuffer: 4 * 1024 * 1024 });
     if (result.error) throw result.error;
     assert.equal(result.status, 0, `${path.basename(binary)} ${args[0]}: ${result.stderr}`);
     return result.stdout;
+  };
+  const fileInfoOracle = path.join(output, `fixture-file-info${process.platform === 'win32' ? '.exe' : ''}`);
+  run('go', ['build', '-trimpath', '-o', fileInfoOracle,
+    fileURLToPath(new URL('./fixture-file-info.go', import.meta.url))], output);
+  const nativeFileInfo = async (root, paths, label) => {
+    const request = path.join(output, `${label}-file-info-request.json`);
+    await fs.writeFile(request, JSON.stringify(paths), { flag: 'wx' });
+    const entries = JSON.parse(run(fileInfoOracle, [root, request], output));
+    assert.deepEqual(entries.map((entry) => entry.path), paths);
+    assert.ok(entries.every((entry) => Number.isSafeInteger(entry.bytes) && entry.bytes >= 0));
+    await fs.writeFile(path.join(output, `${label}-file-info.json`), JSON.stringify(entries, null, 2) + '\n', { flag: 'wx' });
+    return entries;
   };
   let attributeRequest = 0;
   const windowsAttributes = async (root, relativePaths) => {
@@ -154,14 +167,20 @@ export async function smoke({ jj, crabbox, output }) {
   const plan = (revision) => JSON.parse(run(crabbox, ['sync-plan', '--sync-source', 'jj',
     '--sync-revision', revision, '--json']));
   const recordedPlan = plan('native-smoke');
+  await fs.writeFile(path.join(output, 'recorded-plan.json'), JSON.stringify(recordedPlan, null, 2) + '\n', { flag: 'wx' });
   assert.equal(recordedPlan.jujutsu.recordedCommit, commit);
-  const materializedBytes = (files) => files.reduce((sum, file) => sum + (file.kind === 'symlink' ? Buffer.byteLength(file.target) : file.bytes), 0);
+  // Go's Lstat size estimate differs from libuv's symlink-target length on Windows.
+  // Link contents and materialization are independently checked above.
+  const recordedFileInfo = await nativeFileInfo(oracle, paths, 'recorded');
+  const estimatedBytes = (files) => files.reduce((sum, file) => sum + file.bytes, 0);
   assert.equal(recordedPlan.candidate.files, paths.length);
-  assert.equal(recordedPlan.candidate.bytes, materializedBytes(oracleFiles));
+  assert.equal(recordedPlan.candidate.bytes, estimatedBytes(recordedFileInfo));
   const livePlan = plan('');
+  await fs.writeFile(path.join(output, 'live-plan.json'), JSON.stringify(livePlan, null, 2) + '\n', { flag: 'wx' });
   const liveFiles = await materializedFiles(source, [...paths, 'pending.txt']);
+  const liveFileInfo = await nativeFileInfo(source, [...paths, 'pending.txt'], 'live');
   assert.equal(livePlan.candidate.files, paths.length + 1);
-  assert.equal(livePlan.candidate.bytes, materializedBytes(liveFiles));
+  assert.equal(livePlan.candidate.bytes, estimatedBytes(liveFileInfo));
   assert.notEqual(recordedPlan.jujutsu.contentSha256, livePlan.jujutsu.contentSha256);
   const after = await sourceSnapshot();
   await fs.writeFile(path.join(output, 'source-after.json'), JSON.stringify(after, null, 2) + '\n', { flag: 'wx' });
@@ -170,7 +189,7 @@ export async function smoke({ jj, crabbox, output }) {
     node: process.version, platform: process.platform, architecture: process.arch, jjVersion,
     cliSHA256: await fileSHA256(crabbox), helper: pair,
     sourceUnchanged: true, sourceSnapshotSHA256: await fileSHA256(beforeFile), recordedExportMatchesFixture: true, stockMaterializationMatches: true,
-    recordedTypes, oracleFiles, liveFiles, recordedPlan, livePlan, exportCapabilities: exported.capabilities };
+    recordedTypes, oracleFiles, liveFiles, recordedFileInfo, liveFileInfo, recordedPlan, livePlan, exportCapabilities: exported.capabilities };
   await fs.writeFile(path.join(output, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n', { flag: 'wx' });
   return receipt;
 }
