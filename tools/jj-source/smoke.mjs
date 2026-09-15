@@ -27,11 +27,13 @@ export async function smoke({ jj, crabbox, output }) {
   await fs.mkdir(temp);
   const config = path.join(home, 'jj.toml');
   await fs.writeFile(config, '[user]\nname = "Native smoke"\nemail = "smoke@example.invalid"\n');
+  const emptyGitConfig = path.join(home, 'empty-git-config');
+  await fs.writeFile(emptyGitConfig, '', { flag: 'wx', mode: 0o600 });
   const env = {};
   for (const name of ['PATH', 'SystemRoot', 'SYSTEMROOT', 'WINDIR']) {
     if (process.env[name] !== undefined) env[name] = process.env[name];
   }
-  Object.assign(env, isolatedGitConfig(), { HOME: home, USERPROFILE: home, APPDATA: home, LOCALAPPDATA: home,
+  Object.assign(env, isolatedGitConfig(emptyGitConfig), { HOME: home, USERPROFILE: home, APPDATA: home, LOCALAPPDATA: home,
     XDG_CONFIG_HOME: home, XDG_CACHE_HOME: path.join(output, 'cache'),
     XDG_STATE_HOME: path.join(output, 'state'), JJ_CONFIG: config,
     TMPDIR: temp, TEMP: temp, TMP: temp, LANG: 'C', LC_ALL: 'C' });

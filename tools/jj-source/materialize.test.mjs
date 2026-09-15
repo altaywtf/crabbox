@@ -14,11 +14,10 @@ const jjArchive = process.env.CRABBOX_TEST_JJ_ARCHIVE;
 const gixArchive = process.env.CRABBOX_TEST_GIX_ARCHIVE;
 const nativeBinaries = process.env.CRABBOX_TEST_NATIVE_BINARY_DIR;
 
-test('Git configuration isolation uses Git-native empty-file paths', () => {
-  for (const [platform, empty] of [['win32', 'NUL'], ['darwin', '/dev/null'], ['linux', '/dev/null']]) {
-    assert.deepEqual(isolatedGitConfig(platform), { GIT_CONFIG_NOSYSTEM: '1',
-      GIT_CONFIG_GLOBAL: empty, GIT_CONFIG_SYSTEM: empty, GIT_CONFIG_COUNT: '0', GIT_TERMINAL_PROMPT: '0' });
-  }
+test('Git configuration isolation uses an owned empty file', () => {
+  const empty = path.join(os.tmpdir(), 'owned-empty-git-config');
+  assert.deepEqual(isolatedGitConfig(empty), { GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: empty, GIT_CONFIG_SYSTEM: empty, GIT_CONFIG_COUNT: '0', GIT_TERMINAL_PROMPT: '0' });
 });
 
 test('materializes identical pinned sources and preserves an existing destination', {
@@ -26,7 +25,11 @@ test('materializes identical pinned sources and preserves an existing destinatio
 }, async (t) => {
   const owned = await fs.mkdtemp(path.join(os.tmpdir(), 'crabbox-jj-package-test-'));
   t.after(() => fs.rm(owned, { recursive: true }));
-  const first = await materialize({ output: path.join(owned, 'first'), jjArchive, gixArchive });
+  const inventoryFile = path.join(owned, 'inventory.json');
+  const first = await materialize({ output: path.join(owned, 'first'), jjArchive, gixArchive, inventoryFile });
+  const inventory = JSON.parse(await fs.readFile(inventoryFile, 'utf8'));
+  assert.equal(inventory.sha256, first.sourceTree.sha256);
+  assert.equal(inventory.entries.length, first.sourceTree.entryCount);
   const second = await materialize({ output: path.join(owned, 'second'), jjArchive, gixArchive });
   assert.deepEqual(first.sourceTree, second.sourceTree);
   const marker = path.join(first.source, 'keep-me.txt');

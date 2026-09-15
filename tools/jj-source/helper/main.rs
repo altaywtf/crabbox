@@ -594,6 +594,8 @@ mod object_ceiling_tests {
             drop(created);
             if packed {
                 let pack_prefix = fixture.path().join("objects/pack/fixture");
+                let empty_config = fixture.path().join("empty-git-config");
+                std::fs::write(&empty_config, []).unwrap();
                 let mut command = std::process::Command::new("git")
                     .env_clear()
                     .envs(
@@ -602,10 +604,7 @@ mod object_ceiling_tests {
                             .filter_map(|name| std::env::var_os(name).map(|value| (name, value))),
                     )
                     .env("GIT_CONFIG_NOSYSTEM", "1")
-                    .env(
-                        "GIT_CONFIG_GLOBAL",
-                        if cfg!(windows) { "NUL" } else { "/dev/null" },
-                    )
+                    .env("GIT_CONFIG_GLOBAL", &empty_config)
                     .arg("--git-dir")
                     .arg(fixture.path())
                     .arg("pack-objects")

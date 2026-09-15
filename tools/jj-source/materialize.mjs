@@ -27,19 +27,19 @@ async function verify(file, expected) {
   if ((await digest(file)) !== expected) throw new Error(`source package checksum mismatch: ${file}`);
 }
 
-export function isolatedGitConfig(platform = process.platform) {
-  // Git for Windows accepts NUL, not Node's Win32 device path (\\.\nul).
-  const empty = platform === 'win32' ? 'NUL' : '/dev/null';
+export function isolatedGitConfig(empty) {
+  // An owned empty file works across Git ports that disagree on null devices.
+  if (!path.isAbsolute(empty)) throw new Error('Git isolation requires an absolute owned config path');
   return { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: empty, GIT_CONFIG_SYSTEM: empty,
     GIT_CONFIG_COUNT: '0', GIT_TERMINAL_PROMPT: '0' };
 }
 
-function command(name, args, cwd) {
+function command(name, args, cwd, emptyConfig) {
   const env = {};
   for (const key of ['PATH', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'TMPDIR', 'TMP', 'TEMP']) {
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
-  Object.assign(env, isolatedGitConfig(), {
+  Object.assign(env, isolatedGitConfig(emptyConfig), {
     GIT_OPTIONAL_LOCKS: '0',
     LC_ALL: 'C',
   });
@@ -48,7 +48,7 @@ function command(name, args, cwd) {
   if (result.status !== 0) throw new Error(`${name} failed (${result.status}): ${result.stderr.trim()}`);
 }
 
-export async function sourceTree(root) {
+export async function sourceTree(root, { includeEntries = false } = {}) {
   const files = [];
   async function walk(directory) {
     for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
@@ -64,7 +64,8 @@ export async function sourceTree(root) {
   files.sort((left, right) => Buffer.compare(Buffer.from(left[0]), Buffer.from(right[0])));
   const hash = createHash('sha256');
   for (const row of files) hash.update(`${JSON.stringify(row)}\n`);
-  return { algorithm: 'sha256-jsonl-files-v1', sha256: hash.digest('hex'), entryCount: files.length };
+  return { algorithm: 'sha256-jsonl-files-v1', sha256: hash.digest('hex'), entryCount: files.length,
+    ...(includeEntries ? { entries: files } : {}) };
 }
 
 export async function verifyPreparedSource(source, manifest) {
@@ -76,12 +77,19 @@ export async function verifyPreparedSource(source, manifest) {
   return actual;
 }
 
-export async function materialize({ output, jjArchive, gixArchive }) {
+export async function materialize({ output, jjArchive, gixArchive, inventoryFile }) {
   const manifest = JSON.parse(await fs.readFile(path.join(packageRoot, 'manifest.json'), 'utf8'));
   if (manifest.schemaVersion !== 1 || manifest.sourceTree.algorithm !== 'sha256-jsonl-files-v1') {
     throw new Error('unsupported native source package manifest');
   }
   output = path.resolve(output);
+  if (inventoryFile) {
+    inventoryFile = path.resolve(inventoryFile);
+    const relative = path.relative(output, inventoryFile);
+    if (relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))) {
+      throw new Error('source inventory must be outside prepared source');
+    }
+  }
   jjArchive = path.resolve(jjArchive);
   gixArchive = path.resolve(gixArchive);
   await verify(jjArchive, manifest.jj.archiveSha256);
@@ -99,16 +107,19 @@ export async function materialize({ output, jjArchive, gixArchive }) {
     await fs.mkdir(output);
     created = true;
     metadata = await fs.mkdtemp(path.join(os.tmpdir(), 'crabbox-jj-patch-'));
-    command('git', ['init', '--bare', '--template=', '--quiet', metadata], output);
-    command('tar', ['-xzf', jjArchive, '--strip-components=1', '-C', output], output);
+    const emptyConfig = path.join(metadata, 'empty-git-config');
+    await fs.writeFile(emptyConfig, '', { flag: 'wx', mode: 0o600 });
+    const run = (name, args, cwd) => command(name, args, cwd, emptyConfig);
+    run('git', ['init', '--bare', '--template=', '--quiet', metadata], output);
+    run('tar', ['-xzf', jjArchive, '--strip-components=1', '-C', output], output);
     const vendor = path.join(output, 'vendor', 'gix');
     await fs.mkdir(vendor, { recursive: true });
-    command('tar', ['-xzf', gixArchive, '--strip-components=1', '-C', vendor], output);
+    run('tar', ['-xzf', gixArchive, '--strip-components=1', '-C', vendor], output);
     for (const [name, root] of [['jj', output], ['gix', vendor]]) {
       const patch = packagePath(manifest.patches[name].path);
       const args = ['--git-dir', metadata, '--work-tree', root, '-c', 'core.autocrlf=false', 'apply', '--whitespace=nowarn'];
-      command('git', [...args, '--check', patch], root);
-      command('git', [...args, patch], root);
+      run('git', [...args, '--check', patch], root);
+      run('git', [...args, patch], root);
     }
     for (const overlay of manifest.overlays) {
       const target = path.join(output, overlay.target);
@@ -117,6 +128,9 @@ export async function materialize({ output, jjArchive, gixArchive }) {
     }
     await fs.rm(metadata, { recursive: true });
     metadata = undefined;
+    if (inventoryFile) {
+      await fs.writeFile(inventoryFile, JSON.stringify(await sourceTree(output, { includeEntries: true }), null, 2) + '\n', { flag: 'wx', mode: 0o600 });
+    }
     const actual = await verifyPreparedSource(output, manifest);
     return { source: output, jjCommit: manifest.jj.commit, jjVersion: manifest.jj.version, gixVersion: manifest.gix.version, sourceTree: actual };
   } catch (error) {

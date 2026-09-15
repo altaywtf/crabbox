@@ -60,7 +60,7 @@ export async function qualify({ target: key, output, jjArchive, gixArchive }) {
     return destination;
   };
   const source = path.join(output, 'source');
-  const prepared = await materialize({ output: source,
+  const prepared = await materialize({ output: source, inventoryFile: path.join(output, 'source-inventory.json'),
     jjArchive: await archive(jjArchive, 'jj.tar.gz', manifest.jj.archiveUrl),
     gixArchive: await archive(gixArchive, 'gix.crate', manifest.gix.archiveUrl) });
   const cargoArgs = ['--locked', '--offline', '--manifest-path', path.join(source, 'Cargo.toml'),

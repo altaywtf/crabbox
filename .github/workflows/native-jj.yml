@@ -101,5 +101,17 @@ jobs:
             ${{ runner.temp }}/native-jj/native-bundle.tar
             ${{ runner.temp }}/native-jj/qualification.json
             ${{ runner.temp }}/native-jj/architecture.json
+            ${{ runner.temp }}/native-jj/source-inventory.json
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Retain failed preparation diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-jj-${{ matrix.target }}-diagnostics
+          path: |
+            ${{ runner.temp }}/native-jj/architecture.json
+            ${{ runner.temp }}/native-jj/source-inventory.json
+          if-no-files-found: warn
           retention-days: 14

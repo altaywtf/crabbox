@@ -30,6 +30,8 @@ node tools/jj-source/materialize.mjs \
 The destination must not exist. Archive and package hashes are checked before
 creation. A temporary, private Git metadata directory owns patch application;
 the source never inherits an enclosing repository's index or Git configuration.
+Preparation and runtime fixtures use owned empty Git config files rather than
+null-device paths, whose handling differs between Windows Git ports.
 Failed preparation removes only directories created by this invocation and
 reports cleanup failures. Successful preparation prints a JSON source receipt.
 
@@ -138,6 +140,10 @@ selection are checked rather than inferred from runner labels. The workflow
 retains a permission-preserving bundle archive and bounded receipts, not private
 Cargo metadata or credential-bearing runner state. It does not publish releases
 or replace the separate lifecycle, attribution, and signing gates.
+On preparation failure, qualification retains architecture facts and, when
+available, a relative-path/file-digest inventory of the pinned source for
+comparison across hosts. The source identity check still fails and removes its
+new source directory; diagnostics do not authorize mismatched build inputs.
 
 The resulting `crabbox-jj-source` speaks the versioned protocol used by the Go
 adapter. The installed-sibling checker, environment projection and candidate plan/run
