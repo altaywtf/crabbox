@@ -3,7 +3,7 @@ import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { materialize } from './materialize.mjs';
+import { materialize, isolatedGitConfig } from './materialize.mjs';
 import { buildHomes, nativeBuildEnvironment, productionBuildUnits } from './build.mjs';
 import { produce } from './produce.mjs';
 import { spawnSync } from 'node:child_process';
@@ -13,6 +13,13 @@ import { writeNativeNotices } from '../../scripts/test-support/native-artifacts.
 const jjArchive = process.env.CRABBOX_TEST_JJ_ARCHIVE;
 const gixArchive = process.env.CRABBOX_TEST_GIX_ARCHIVE;
 const nativeBinaries = process.env.CRABBOX_TEST_NATIVE_BINARY_DIR;
+
+test('Git configuration isolation uses Git-native empty-file paths', () => {
+  for (const [platform, empty] of [['win32', 'NUL'], ['darwin', '/dev/null'], ['linux', '/dev/null']]) {
+    assert.deepEqual(isolatedGitConfig(platform), { GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: empty, GIT_CONFIG_SYSTEM: empty, GIT_CONFIG_COUNT: '0', GIT_TERMINAL_PROMPT: '0' });
+  }
+});
 
 test('materializes identical pinned sources and preserves an existing destination', {
   skip: !jjArchive || !gixArchive ? 'requires the two pinned upstream archives' : false,

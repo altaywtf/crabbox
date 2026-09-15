@@ -27,17 +27,19 @@ async function verify(file, expected) {
   if ((await digest(file)) !== expected) throw new Error(`source package checksum mismatch: ${file}`);
 }
 
+export function isolatedGitConfig(platform = process.platform) {
+  // Git for Windows accepts NUL, not Node's Win32 device path (\\.\nul).
+  const empty = platform === 'win32' ? 'NUL' : '/dev/null';
+  return { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: empty, GIT_CONFIG_SYSTEM: empty,
+    GIT_CONFIG_COUNT: '0', GIT_TERMINAL_PROMPT: '0' };
+}
+
 function command(name, args, cwd) {
   const env = {};
   for (const key of ['PATH', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'TMPDIR', 'TMP', 'TEMP']) {
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
-  Object.assign(env, {
-    GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: os.devNull,
-    GIT_CONFIG_SYSTEM: os.devNull,
-    GIT_CONFIG_COUNT: '0',
-    GIT_TERMINAL_PROMPT: '0',
+  Object.assign(env, isolatedGitConfig(), {
     GIT_OPTIONAL_LOCKS: '0',
     LC_ALL: 'C',
   });

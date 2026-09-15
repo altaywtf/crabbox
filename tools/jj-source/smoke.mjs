@@ -1,13 +1,12 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { spawnSync } from 'node:child_process';
 import { fileSHA256, nativeTarget, verifyPair, verifySourceVersion } from './artifacts.mjs';
-import { sourceTree } from './materialize.mjs';
+import { sourceTree, isolatedGitConfig } from './materialize.mjs';
 
 // This ordinary-file smoke is portable; executable/symlink and SSH lifecycle
 // acceptance require their separate platform fixtures.
@@ -32,12 +31,10 @@ export async function smoke({ jj, crabbox, output }) {
   for (const name of ['PATH', 'SystemRoot', 'SYSTEMROOT', 'WINDIR']) {
     if (process.env[name] !== undefined) env[name] = process.env[name];
   }
-  Object.assign(env, { HOME: home, USERPROFILE: home, APPDATA: home, LOCALAPPDATA: home,
+  Object.assign(env, isolatedGitConfig(), { HOME: home, USERPROFILE: home, APPDATA: home, LOCALAPPDATA: home,
     XDG_CONFIG_HOME: home, XDG_CACHE_HOME: path.join(output, 'cache'),
     XDG_STATE_HOME: path.join(output, 'state'), JJ_CONFIG: config,
-    TMPDIR: temp, TEMP: temp, TMP: temp, LANG: 'C', LC_ALL: 'C',
-    GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: os.devNull,
-    GIT_CONFIG_SYSTEM: os.devNull, GIT_CONFIG_COUNT: '0', GIT_TERMINAL_PROMPT: '0' });
+    TMPDIR: temp, TEMP: temp, TMP: temp, LANG: 'C', LC_ALL: 'C' });
   const run = (binary, args, cwd = source) => {
     const result = spawnSync(binary, args, { cwd, env, encoding: 'utf8', timeout: 180_000, maxBuffer: 4 * 1024 * 1024 });
     if (result.error) throw result.error;
