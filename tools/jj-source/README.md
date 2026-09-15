@@ -144,6 +144,9 @@ source, fetch locked dependencies, run the focused Rust test, build pristine sto
 JJ from the original pinned archive, produce the companion bundle, and run the
 source smoke with a fresh native CLI. The stock oracle uses `git,tokio/net`
 without candidate patches; its source and build features are recorded separately.
+Before compilation, the workflow checks native archive listing and attribution
+reads against the already verified extracted gix files. Listing line endings are
+decoded separately from member names; file contents remain byte-exact.
 Node, hardware, Rust host, Go host/target, and Windows compiler
 selection are checked rather than inferred from runner labels. The workflow
 retains a permission-preserving bundle archive and bounded receipts, not private
@@ -291,6 +294,10 @@ copyright statement. The report binds the text's SHA-256 and size to the origina
 helper/source/target identity. `notice-artifacts.mjs` verifies that handoff without
 needing the original Cargo cache; it retains unresolved entries rather than
 interpreting byte consistency as complete attribution.
+Historical notices carry their own source commit and each current package's
+separate VCS binding. The verified ancestor MIT notice for `block2`, `objc2`, and
+`objc2-encode` preserves known upstream copyright text, but is labeled historical
+and does not clear their current attribution gaps.
 The text artifact keeps every package/path reference while emitting identical
 verbatim bytes once by SHA-256. This is an observed-build attribution inventory,
 not an exact list of linked code or legal clearance. Native/system libraries and

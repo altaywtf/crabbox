@@ -42,6 +42,10 @@ export function attributionPath(relative) {
   return /(?:^|[-_.])(?:licen[cs]e|unlicense|notice|notices|copying|copyright)(?:$|[-_.])/i.test(path.posix.basename(relative));
 }
 
+export function hasCurrentAttribution(materials) {
+  return materials.some((item) => item.kind === 'package-file' || item.kind === 'upstream-license');
+}
+
 function childRelative(parent, file) {
   const relative = path.relative(parent, file);
   if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error('notice input is outside its declared source root');
@@ -51,12 +55,12 @@ function childRelative(parent, file) {
 function tar(args, limit) {
   const result = spawnSync('tar', args, { encoding: null, maxBuffer: limit, stdio: ['ignore', 'pipe', 'pipe'] });
   if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error('cannot read the locked package archive');
+  if (result.status !== 0) throw new Error(`cannot read locked package archive ${path.basename(args[1])}${args.length > 2 ? ` member ${JSON.stringify(args.at(-1))}` : ''} (tar exit ${result.status})`);
   return result.stdout;
 }
 
-function archiveMembers(archive, prefix) {
-  const names = tar(['-tzf', archive], 8 * 1024 * 1024).toString('utf8').split('\n').filter(Boolean);
+export function parseArchiveMembers(listing, prefix) {
+  const names = listing.split(/\r?\n/).filter(Boolean);
   const files = [];
   for (const name of names) {
     if (name.endsWith('/')) continue;
@@ -64,6 +68,14 @@ function archiveMembers(archive, prefix) {
     files.push(name.slice(prefix.length + 1));
   }
   return sorted(files);
+}
+
+export function archiveMembers(archive, prefix) {
+  return parseArchiveMembers(tar(['-tzf', archive], 8 * 1024 * 1024).toString('utf8'), prefix);
+}
+
+export function archiveFile(archive, prefix, relative) {
+  return tar(['-xOf', archive, '--', `${prefix}/${relative}`], maximumText);
 }
 
 function sourceFiles(directory) {
@@ -84,7 +96,10 @@ export function renderNotices(report, materialText) {
   for (const item of report.unresolved) text += `Unresolved: ${item.name} ${item.version}: ${item.reason}\n`;
   for (const record of report.packages) {
     text += `\n============================================================\n${record.name} ${record.version}\nDeclared license: ${record.declaredLicense ?? 'not declared'}\nSource: ${JSON.stringify(record.origin)}\n`;
-    for (const material of record.materials) text += `Attribution: ${material.path} (${material.kind}; SHA-256 ${material.sha256})${material.url ? `\nUpstream: ${material.url}` : ''}\n`;
+    for (const material of record.materials) {
+      text += `Attribution: ${material.path} (${material.kind}; SHA-256 ${material.sha256})${material.url ? `\nUpstream: ${material.url}` : ''}\n`;
+      if (material.kind === 'upstream-historical-license') text += `Historical notice for package revision ${material.packageCommit}; does not resolve current attribution.\n`;
+    }
   }
   for (const sha256 of sorted([...materialText.keys()])) text += `\n============================================================\nVerbatim attribution text SHA-256 ${sha256}\n\n${materialText.get(sha256)}\n`;
   return text;
@@ -125,7 +140,7 @@ export async function collectNotices({ source, buildReport, metadata, pair, outp
       if (!/^[0-9a-f]{64}$/.test(locked.checksum ?? '') || await fileSHA256(archive) !== locked.checksum) throw new Error(`crate archive checksum mismatch: ${pkg.name}`);
       const prefix = `${pkg.name}-${pkg.version}`;
       paths = archiveMembers(archive, prefix);
-      read = (relative) => tar(['-xOf', archive, '--', `${prefix}/${relative}`], maximumText);
+      read = (relative) => archiveFile(archive, prefix, relative);
       if (!read('Cargo.toml').equals(fs.readFileSync(pkg.manifest_path))) throw new Error(`package dictionary manifest differs from the locked archive: ${pkg.name}`);
       origin = { kind: 'registry', source: pkg.source, archiveSHA256: locked.checksum };
     } else if (pkg.source == null) {
@@ -150,8 +165,13 @@ export async function collectNotices({ source, buildReport, metadata, pair, outp
       const match = supplement.packages.find((item) => item.name === pkg.name && item.version === pkg.version);
       if (!match) continue;
       const vcs = JSON.parse(read('.cargo_vcs_info.json').toString('utf8'));
-      if (pkg.repository?.replace(/\.git$/, '') !== supplement.repository || vcs.git?.sha1 !== supplement.commit ||
-          vcs.path_in_vcs !== match.vcsPath || !['overview', 'license'].includes(supplement.kind)) {
+      const historical = supplement.kind === 'historical-license';
+      const packageCommit = historical ? match.commit : supplement.commit;
+      if (pkg.repository?.replace(/\.git$/, '') !== supplement.repository || vcs.git?.sha1 !== packageCommit ||
+          !/^[0-9a-f]{40}$/.test(supplement.commit) ||
+          (historical && (!/^[0-9a-f]{40}$/.test(packageCommit ?? '') || packageCommit === supplement.commit)) ||
+          (!historical && match.commit !== undefined) ||
+          vcs.path_in_vcs !== match.vcsPath || !['overview', 'license', 'historical-license'].includes(supplement.kind)) {
         throw new Error(`notice supplement does not match the crate's recorded origin: ${pkg.name}`);
       }
       const file = fs.realpathSync(path.join(root, supplement.file));
@@ -161,9 +181,11 @@ export async function collectNotices({ source, buildReport, metadata, pair, outp
       if (!bytes.length || bytes.length > maximumText || total > maximumTotal || hash(bytes) !== supplement.sha256) throw new Error('notice supplement checksum or size mismatch');
       materialText.set(supplement.sha256, new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes));
       materials.push({ path: supplement.upstreamPath, sha256: supplement.sha256, bytes: bytes.length,
-        kind: `upstream-${supplement.kind}`, url: `${supplement.repository}/blob/${supplement.commit}/${supplement.upstreamPath}` });
+        kind: `upstream-${supplement.kind}`, url: `${supplement.repository}/blob/${supplement.commit}/${supplement.upstreamPath}`,
+        ...(historical ? { packageCommit } : {}) });
     }
-    if (!materials.some((item) => item.kind !== 'upstream-overview')) unresolved.push({ name: pkg.name, version: pkg.version,
+    // Historical notices preserve known attribution without clearing current gaps.
+    if (!hasCurrentAttribution(materials)) unresolved.push({ name: pkg.name, version: pkg.version,
       reason: materials.length ? 'upstream-overview-without-license-text' : 'no-packaged-attribution-text' });
     const featureSets = [...new Set(build.buildUnits.filter((unit) => unit.packageId === id).map((unit) => JSON.stringify(unit.features)))].sort().map(JSON.parse);
     records.push({ name: pkg.name, version: pkg.version, declaredLicense: pkg.license, repository: pkg.repository,

@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import crypto from 'node:crypto';
-import { lockedPackages, attributionPath, renderNotices, collectNotices } from './notices.mjs';
+import { lockedPackages, attributionPath, hasCurrentAttribution, parseArchiveMembers, renderNotices, collectNotices } from './notices.mjs';
 import { verifyNoticeBundle, noticeName, attributionName } from './notice-artifacts.mjs';
 
 test('Cargo-generated lock identities distinguish registry and prepared packages', () => {
@@ -29,6 +29,20 @@ version = "2.0.0"
 test('attribution discovery includes nested and alternative notice filenames', () => {
   for (const file of ['LICENSE-MIT', 'COPYRIGHT', 'UNLICENSE', 'src/spin/LICENSE', 'NOTICES.md', 'docs/fonts/OFL-LICENSE.txt', 'LICENSE-Apache-2.0_WITH_LLVM-exception']) assert.equal(attributionPath(file), true, file);
   for (const file of ['Cargo.toml', 'src/lib.rs', 'README.md']) assert.equal(attributionPath(file), false, file);
+});
+
+test('archive listings accept native line endings without trimming member names', () => {
+  for (const newline of ['\n', '\r\n']) {
+    const listing = ['example-1.0.0/', 'example-1.0.0/LICENSE-MIT ', 'example-1.0.0/README.md', ''].join(newline);
+    assert.deepEqual(parseArchiveMembers(listing, 'example-1.0.0'), ['LICENSE-MIT ', 'README.md']);
+  }
+});
+
+test('historical notices cannot clear current attribution gaps', () => {
+  const historical = [{ kind: 'upstream-overview' }, { kind: 'upstream-historical-license' }];
+  assert.equal(hasCurrentAttribution(historical), false);
+  assert.equal(hasCurrentAttribution([...historical, { kind: 'package-file' }]), true);
+  assert.equal(hasCurrentAttribution([...historical, { kind: 'upstream-license' }]), true);
 });
 
 test('rendering retains every package reference while storing identical text once', () => {
@@ -82,6 +96,12 @@ test('observed native build notice collection is deterministic', { skip: !proces
   const verified = await verifyNoticeBundle(first.directory, receipt);
   assert.equal(verified.text.sha256, first.noticeSHA256);
   assert.deepEqual(verified.unresolved, first.unresolved);
+  if (receipt.targetOS === 'darwin') {
+    const report = JSON.parse(await fs.readFile(path.join(first.directory, attributionName), 'utf8'));
+    const historical = report.packages.filter((pkg) => pkg.materials.some((item) => item.kind === 'upstream-historical-license'));
+    assert.deepEqual(historical.map((pkg) => pkg.name).sort(), ['block2', 'objc2', 'objc2-encode']);
+    for (const pkg of historical) assert.ok(report.unresolved.some((item) => item.name === pkg.name && item.version === pkg.version));
+  }
   await assert.rejects(verifyNoticeBundle(first.directory, { ...receipt, binarySHA256: '0'.repeat(64) }), /do not match/);
   await fs.appendFile(path.join(first.directory, noticeName), '\nchanged fixture text\n');
   await assert.rejects(verifyNoticeBundle(first.directory, receipt), /do not match/);

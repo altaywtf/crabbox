@@ -14,6 +14,7 @@ import { nativeBuildEnvironment } from './build.mjs';
 import { materialize, verifyPreparedSource, sourceTree } from './materialize.mjs';
 import { produce } from './produce.mjs';
 import { smoke } from './smoke.mjs';
+import { archiveMembers, archiveFile, attributionPath } from './notices.mjs';
 
 const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 const repository = path.resolve(packageRoot, '../..');
@@ -64,6 +65,13 @@ export async function qualify({ target: key, output, jjArchive, gixArchive }) {
   const source = path.join(output, 'source');
   const prepared = await materialize({ output: source, inventoryFile: path.join(output, 'source-inventory.json'),
     jjArchive, gixArchive });
+  // Check native tar listing/reading before spending time compiling the helper.
+  const gixPrefix = `gix-${manifest.gix.version}`;
+  const noticePaths = archiveMembers(gixArchive, gixPrefix).filter(attributionPath);
+  assert.ok(noticePaths.length > 0, 'pinned gix archive has no attribution files');
+  for (const relative of noticePaths) {
+    assert.deepEqual(archiveFile(gixArchive, gixPrefix, relative), await fs.readFile(path.join(source, 'vendor', 'gix', relative)));
+  }
   const cargoArgs = ['--locked', '--offline', '--manifest-path', path.join(source, 'Cargo.toml'),
     '-p', 'jj-cli', '--no-default-features', '--features', 'git', '--target', target.targetTriple];
   // Network access is limited to dependency preparation; builds remain offline.
