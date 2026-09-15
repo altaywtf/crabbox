@@ -83,7 +83,12 @@ export async function qualify({ target: key, output, jjArchive, gixArchive }) {
     scope: 'Native ordinary-file qualification and focused Rust test; not executable/symlink, SSH lifecycle, licensing, signing or full release acceptance.' };
   await fs.writeFile(path.join(output, 'qualification.json'), JSON.stringify(receipt, null, 2) + '\n', { flag: 'wx' });
   // Keep permissions inside the archive when Actions transports the bundle.
-  run('tar', ['-cf', path.join(output, 'native-bundle.tar'), ...await fs.readdir(produced.bundle)], produced.bundle);
+  // macOS tar otherwise adds AppleDouble metadata outside the four-file contract.
+  env.COPYFILE_DISABLE = '1';
+  const members = (await fs.readdir(produced.bundle)).sort();
+  const archivePath = path.join(output, 'native-bundle.tar');
+  run('tar', ['-cf', archivePath, ...members], produced.bundle);
+  assert.deepEqual(run('tar', ['-tf', archivePath]).split('\n').sort(), members);
   return receipt;
 }
 
