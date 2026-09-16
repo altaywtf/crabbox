@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Preserve recorded direct-lease idle timeouts across provider preparation, reuse, and repository reclaim; honor explicit run and heartbeat replacements while keeping claim labels and coordinator registration consistent without overriding managed-coordinator policy. [PR 2288](https://github.com/openclaw/crabbox/pull/2288).
+- Keep Sprites status and list factual: omit unavailable birth and expiry, show recorded lease policy instead of reader defaults, and preserve acquisition policy through endpoint preparation and reuse.
 
 - Preserve ownership of previously synced files when attaching local Git metadata to a raw workspace, so later syncs can remove obsolete files without importing stale readiness markers. Keep local Git pruning on the safe manifest path, rejecting directory symlinks before deleting files outside the workspace. [PR 2285](https://github.com/openclaw/crabbox/pull/2285).
 
