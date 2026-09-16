@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Keep ASCII Box observations tied to native timestamps and expiry, preserve saved lease policy across reuse, persist heartbeat activity, and retain direct-lease idle policy unless explicitly replaced.
+- Keep ASCII Box observations tied to native timestamps and expiry, preserve saved lease policy across reuse, persist heartbeat activity, and retain direct-lease idle policy unless explicitly replaced. [PR 2287](https://github.com/openclaw/crabbox/pull/2287).
 
 - Keep Upstash Box status age and runtime metadata tied to native observations, preserve recorded local lease policy across reuse, and omit unknown policy instead of inventing current defaults or expiry. [PR 2283](https://github.com/openclaw/crabbox/pull/2283).
 
