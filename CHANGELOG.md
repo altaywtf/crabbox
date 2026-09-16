@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Preserve existing remote workspaces when origin Git metadata is seeded after a raw sync, including managed deletion ownership and native Windows metadata publication. [PR 2284](https://github.com/openclaw/crabbox/pull/2284).
+- Preserve existing remote workspaces when origin Git metadata is seeded after a raw sync, including excluded initial absences, retry-safe managed deletion ownership, and native Windows metadata publication. [PR 2284](https://github.com/openclaw/crabbox/pull/2284).
 
 - Bound retained POSIX preflight version output before extracting its first line, while draining excess output so verbose tools finish normally. [PR 2282](https://github.com/openclaw/crabbox/pull/2282).
 

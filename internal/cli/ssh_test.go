@@ -3439,12 +3439,22 @@ func TestRemoteFinalizeSyncCompletedRetryPreservesNewerPendingState(t *testing.T
 	if err := os.WriteFile(filepath.Join(metaDir, remoteSyncPendingDeletedName(completedToken)), []byte("completed-old.txt\x00"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	mustWriteTestFile(t, filepath.Join(metaDir, remoteCoherenceOmissionsName(completedToken)), "omitted\x00")
 	completedRemote := remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: completedToken})
 	if out, err := exec.Command("bash", "-lc", completedRemote).CombinedOutput(); err != nil {
 		t.Fatalf("initial finalize: %v\n%s", err, out)
 	}
 
+	if _, err := os.Stat(filepath.Join(metaDir, remoteCoherenceOmissionsName(completedToken))); !os.IsNotExist(err) {
+		t.Fatalf("completed token omissions retained: %v", err)
+	}
+	// Simulate transport loss after completion but before token cleanup.
+	completedFiles := []string{remoteSyncPendingManifestName(completedToken), remoteSyncPendingDeletedName(completedToken), remoteCoherenceOmissionsName(completedToken)}
+	for _, name := range completedFiles {
+		mustWriteTestFile(t, filepath.Join(metaDir, name), "left after completion\x00")
+	}
 	newerFiles := map[string]string{
+		remoteCoherenceOmissionsName(newerToken):  "newer-omitted\x00",
 		remoteSyncPendingManifestName(newerToken): "newer.txt\x00",
 		remoteSyncPendingDeletedName(newerToken):  "newer-old.txt\x00",
 	}
@@ -3455,6 +3465,11 @@ func TestRemoteFinalizeSyncCompletedRetryPreservesNewerPendingState(t *testing.T
 	}
 	if out, err := exec.Command("bash", "-lc", completedRemote).CombinedOutput(); err != nil {
 		t.Fatalf("completed retry: %v\n%s", err, out)
+	}
+	for _, name := range completedFiles {
+		if _, err := os.Stat(filepath.Join(metaDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("completed token input survived retry: %s: %v", name, err)
+		}
 	}
 	for name, want := range newerFiles {
 		got, err := os.ReadFile(filepath.Join(metaDir, name))
@@ -3799,10 +3814,29 @@ func TestRemoteSyncAbandonedMetadataCleanupRemovesStatusFile(t *testing.T) {
 	if err := os.Chtimes(statusPath, old, old); err != nil {
 		t.Fatal(err)
 	}
+	stale := filepath.Join(metaDir, remoteCoherenceOmissionsName("abandoned"))
+	fresh := filepath.Join(metaDir, remoteCoherenceOmissionsName("current"))
+	input := filepath.Join(metaDir, remoteCoherenceOmissionsName("abandoned")+".input.123")
+	mustWriteTestFile(t, input, "abandoned input")
+	if err := os.Chtimes(input, old, old); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteTestFile(t, stale, "old\x00")
+	mustWriteTestFile(t, fresh, "fresh\x00")
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
 	script := "set -e\nmeta_dir=" + shellQuote(metaDir) + "\n" + remoteSyncAbandonedMetadataCleanup()
 	if out, err := exec.Command("bash", "-c", script).CombinedOutput(); err != nil {
 		t.Fatalf("cleanup abandoned status: %v\n%s", err, out)
 	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale omissions survived: %v", err)
+	}
+	if _, err := os.Stat(input); !os.IsNotExist(err) {
+		t.Fatalf("stale omission input survived: %v", err)
+	}
+	requireOriginFile(t, fresh, "fresh\x00")
 	if _, err := os.Stat(statusPath); !os.IsNotExist(err) {
 		t.Fatalf("abandoned status file survived cleanup: %v", err)
 	}
@@ -4331,6 +4365,18 @@ func TestRemoteGitCoherenceRollsBackFailuresAndRetries(t *testing.T) {
 			mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "B\n")
 			token := fmt.Sprintf("%032x", len(failure)+100)
 			stageCoherenceFinalize(t, workdir, token)
+			meta := coherenceMetaDir(t, workdir)
+			prior := map[string]string{
+				"sync-manifest":       "old-owned.txt\x00",
+				"sync-finalize-token": "000000000000000000000000000000aa",
+				"git-hydrate-base":    "old-base",
+			}
+			mustWriteTestFile(t, filepath.Join(meta, "sync-finalize-complete-token"), "000000000000000000000000000000aa")
+			mustWriteTestFile(t, filepath.Join(meta, "sync-fingerprint"), "old-fingerprint")
+			for name, data := range prior {
+				mustWriteTestFile(t, filepath.Join(meta, name), data)
+			}
+			mustWriteTestFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(token)), "excluded\x00")
 			beforeIndex := coherenceIndexBytes(t, workdir)
 			tools := coherenceFailureTools(t, plan.Target)
 			env := []string{"PATH=" + tools + string(os.PathListSeparator) + os.Getenv("PATH")}
@@ -4350,6 +4396,16 @@ func TestRemoteGitCoherenceRollsBackFailuresAndRetries(t *testing.T) {
 			if got := readCoherentFingerprint(t, workdir, plan); got != "" {
 				t.Fatalf("failed finalization certified fingerprint %q", got)
 			}
+			for name, want := range prior {
+				requireOriginFile(t, filepath.Join(meta, name), want)
+			}
+			for _, name := range []string{"sync-finalize-complete-token", "sync-fingerprint"} {
+				if _, err := os.Stat(filepath.Join(meta, name)); !os.IsNotExist(err) {
+					t.Fatalf("failed sync retained certificate %s: %v", name, err)
+				}
+			}
+			requireOriginFile(t, filepath.Join(meta, remoteSyncPendingManifestName(token)), "tracked.txt\x00")
+			requireOriginFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(token)), "excluded\x00")
 			if out, err := runCoherenceFinalize(workdir, plan, token, "fp-"+failure); err != nil {
 				t.Fatalf("retry: %v\n%s", err, out)
 			}
@@ -6928,5 +6984,588 @@ func TestCommandIntentShellSourceKeepsExistingShell(t *testing.T) {
 		if got := intent.ShellSource(); got != tc.want {
 			t.Fatalf("empty source shell=%t got=%q want=%q", tc.shell, got, tc.want)
 		}
+	}
+}
+
+func TestOriginSeedInitialAbsencesSurviveReuse(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX origin seed fixture")
+	}
+	for _, mode := range []string{"branch", "branchless", "plain"} {
+		t.Run(mode, func(t *testing.T) {
+			plan, workdir, absent, present := newOriginAbsenceFixture(t)
+			if mode == "branchless" {
+				plan.Branch = ""
+			}
+			runOriginScript(t, remoteGitSeed(workdir, plan), "")
+			meta := coherenceMetaDir(t, workdir)
+			initial := strings.Join(absent, "\x00") + "\x00"
+			requireOriginFile(t, filepath.Join(meta, remoteOriginSeedInitialAbsencesName()), initial)
+			selector := append(append([]string{}, absent...), present...)
+			for i := 1; i <= 2; i++ {
+				token := fmt.Sprintf("%032x", i)
+				out := runOriginScript(t, remoteWriteSyncManifestsNew(workdir, token), syncManifestInputForTarget(SSHTarget{}, []byte("keep.txt\x00"), nil))
+				if !strings.Contains(out, "crabbox-git-seed raw-workspace\n") {
+					t.Fatalf("staging lost raw provenance: %q", out)
+				}
+				runOriginScript(t, remoteCaptureCoherenceOmissions(workdir, token), strings.Join(selector, "\x00")+"\x00")
+				requireOriginFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(token)), initial)
+				runOriginScript(t, remotePruneSyncManifestForTargetMode(SSHTarget{}, workdir, token, true), "")
+				opts := remoteSyncFinalizeOptions{Token: token, Coherence: plan, CoherenceOmissions: true}
+				if mode == "plain" {
+					opts.Coherence = gitCoherencePlan{}
+					opts.PlainManifest = true
+				}
+				runOriginScript(t, remoteFinalizeSync(workdir, opts), "")
+				if _, err := os.Stat(filepath.Join(meta, remoteCoherenceOmissionsName(token))); !os.IsNotExist(err) {
+					t.Fatalf("completed omissions survived: %v", err)
+				}
+				runOriginScript(t, remoteGitSeed(workdir, plan), "")
+				requireOriginFile(t, filepath.Join(meta, remoteOriginSeedInitialAbsencesName()), initial)
+			}
+			// A later selector uses the immutable initial set, not a fresh diff.
+			const changed = "00000000000000000000000000000003"
+			runOriginScript(t, remoteCaptureCoherenceOmissions(workdir, changed), absent[0]+"\x00")
+			requireOriginFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(changed)), absent[0]+"\x00")
+			// Reusing one token cannot widen the observation after its first capture.
+			runOriginScript(t, remoteCaptureCoherenceOmissions(workdir, changed), strings.Join(selector, "\x00")+"\x00")
+			requireOriginFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(changed)), absent[0]+"\x00")
+			runOriginScript(t, remoteDiscardSyncPendingMetadata(workdir, changed, false), "")
+			for _, path := range present {
+				if err := os.Remove(filepath.Join(workdir, path)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, token := range []string{"00000000000000000000000000000004", "00000000000000000000000000000005"} {
+				stageCoherenceFinalize(t, workdir, token)
+				runOriginScript(t, remoteCaptureCoherenceOmissions(workdir, token), strings.Join(selector, "\x00")+"\x00")
+				requireOriginFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(token)), initial)
+				opts := remoteSyncFinalizeOptions{Token: token, Coherence: plan, CoherenceOmissions: true}
+				if mode == "plain" {
+					opts.Coherence = gitCoherencePlan{}
+					opts.PlainManifest = true
+				}
+				for attempt := 0; attempt < 2; attempt++ {
+					out, err := exec.Command("/bin/sh", "-c", remoteFinalizeSync(workdir, opts)).CombinedOutput()
+					if exitCode(err) != 66 || !strings.Contains(string(out), "200 tracked deletions") {
+						t.Fatalf("later deletion admitted: err=%v output=%s", err, out)
+					}
+					requireOriginFile(t, filepath.Join(meta, "sync-manifest"), "keep.txt\x00")
+					if _, err := os.Stat(filepath.Join(meta, "sync-finalize-complete-token")); !os.IsNotExist(err) {
+						t.Fatalf("failed sync retained completion: %v", err)
+					}
+				}
+			}
+		})
+	}
+}
+
+func newOriginAbsenceFixture(t *testing.T) (gitCoherencePlan, string, []string, []string) {
+	t.Helper()
+	source, workdir := filepath.Join(t.TempDir(), "source"), filepath.Join(t.TempDir(), "raw")
+	mustWriteTestFile(t, filepath.Join(source, "keep.txt"), "keep\n")
+	mustWriteTestFile(t, filepath.Join(workdir, "keep.txt"), "keep\n")
+	var absent, present []string
+	for i := 0; i < 200; i++ {
+		a, p := fmt.Sprintf("absent/%03d.txt", i), fmt.Sprintf("present/%03d.txt", i)
+		if i == 0 {
+			a = "absent/000\nline.txt"
+		}
+		absent, present = append(absent, a), append(present, p)
+		mustWriteTestFile(t, filepath.Join(source, a), "absent\n")
+		mustWriteTestFile(t, filepath.Join(source, p), "present\n")
+		mustWriteTestFile(t, filepath.Join(workdir, p), "present\n")
+	}
+	runGit(t, source, "init")
+	runGit(t, source, "config", "user.email", "test@example.com")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "branch", "-M", "main")
+	runGit(t, source, "add", ".")
+	runGit(t, source, "commit", "-m", "seed")
+	return gitCoherencePlan{RemoteURL: source, Target: gitOutput(source, "rev-parse", "HEAD"), Tree: gitOutput(source, "rev-parse", "HEAD^{tree}"), Branch: "main"}, workdir, absent, present
+}
+
+func runOriginScript(t *testing.T, script, input string) string {
+	t.Helper()
+	cmd := exec.Command("/bin/sh", "-c", script)
+	cmd.Stdin = strings.NewReader(input)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("origin script: %v\n%s", err, out)
+	}
+	return string(out)
+}
+
+func requireOriginFile(t *testing.T, path, want string) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != want {
+		t.Fatalf("%s: got %q err=%v want %q", filepath.Base(path), got, err, want)
+	}
+}
+
+func TestOriginSeedPriorManifestOwnsAbsentPaths(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX origin seed fixture")
+	}
+	plan, workdir, absent, _ := newOriginAbsenceFixture(t)
+	prior := strings.Join(absent, "\x00") + "\x00"
+	mustWriteTestFile(t, filepath.Join(workdir, ".crabbox", "sync-manifest"), prior)
+	runOriginScript(t, remoteGitSeed(workdir, plan), "")
+	const token = "00000000000000000000000000000006"
+	stageCoherenceFinalize(t, workdir, token)
+	runOriginScript(t, remoteCaptureCoherenceOmissions(workdir, token), prior)
+	meta := coherenceMetaDir(t, workdir)
+	requireOriginFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(token)), "")
+	out, err := exec.Command("/bin/sh", "-c", remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: token, Coherence: plan, CoherenceOmissions: true})).CombinedOutput()
+	if exitCode(err) != 66 {
+		t.Fatalf("owned deletion admitted: %v\n%s", err, out)
+	}
+	requireOriginFile(t, filepath.Join(meta, "sync-manifest"), prior)
+	// A fresh token after failure must still observe canonical old ownership.
+	const next = "00000000000000000000000000000007"
+	runOriginScript(t, remoteCaptureCoherenceOmissions(workdir, next), prior)
+	requireOriginFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(next)), "")
+}
+
+func TestOriginSeedCaptureInterpretersAndInvalidRecords(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX interpreter fixture")
+	}
+	for _, interpreter := range []string{"python3", "perl"} {
+		t.Run(interpreter, func(t *testing.T) {
+			tools := t.TempDir()
+			for _, name := range []string{"git", "cat", "rm", "mv", "mkdir", "dirname", "basename", interpreter} {
+				mustWriteTestCommandWrapper(t, tools, name)
+			}
+			mustWriteTestBashNoProfileWrapper(t, tools)
+			workdir := t.TempDir()
+			meta := filepath.Join(workdir, ".crabbox")
+			initial := "absent\nfile\x00owned\x00present\x00"
+			mustWriteTestFile(t, filepath.Join(meta, remoteOriginSeedInitialAbsencesName()), initial)
+			mustWriteTestFile(t, filepath.Join(meta, "sync-manifest"), "owned\x00")
+			mustWriteTestFile(t, filepath.Join(workdir, "present"), "present")
+			const token = "00000000000000000000000000000008"
+			run := func(input string) ([]byte, error) {
+				cmd := exec.Command("/bin/bash", "--noprofile", "--norc", "-c", remoteCaptureCoherenceOmissions(workdir, token))
+				cmd.Env = append(os.Environ(), "PATH="+tools)
+				cmd.Stdin = strings.NewReader(input)
+				return cmd.CombinedOutput()
+			}
+			if out, err := run(initial + "absent\nfile\x00"); err != nil {
+				t.Fatalf("capture: %v\n%s", err, out)
+			}
+			requireOriginFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(token)), "absent\nfile\x00")
+			for _, invalid := range []string{"unterminated", "../escape\x00", "empty//part\x00"} {
+				if out, err := run(invalid); err == nil {
+					t.Fatalf("accepted invalid %q: %s", invalid, out)
+				}
+			}
+			// Opening a directory can succeed in Perl; a failed read must not
+			// turn canonical ownership into an empty manifest.
+			if err := os.Remove(filepath.Join(meta, "sync-manifest")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(filepath.Join(meta, "sync-manifest"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(filepath.Join(meta, remoteCoherenceOmissionsName(token))); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := run(initial); err == nil {
+				t.Fatalf("old manifest read error became empty ownership: %s", out)
+			}
+			if _, err := os.Stat(filepath.Join(meta, remoteCoherenceOmissionsName(token))); !os.IsNotExist(err) {
+				t.Fatalf("read error published omissions: %v", err)
+			}
+			if err := os.Remove(filepath.Join(meta, remoteOriginSeedInitialAbsencesName())); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := run(initial); exitCode(err) != 67 {
+				t.Fatalf("missing provenance admitted: %v\n%s", err, out)
+			}
+		})
+	}
+}
+
+func TestOriginSeedRawMetadataRejectsParentAliases(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX alias fixture")
+	}
+	f := newGitCoherenceFixture(t)
+	plan := f.plan(t, f.b)
+	for _, alias := range []bool{false, true} {
+		t.Run(fmt.Sprintf("metadata-alias-%v", alias), func(t *testing.T) {
+			workdir := filepath.Join(t.TempDir(), "raw")
+			mustWriteTestFile(t, filepath.Join(workdir, "keep"), "keep")
+			external := t.TempDir()
+			mustWriteTestFile(t, filepath.Join(external, "sync-manifest"), "external\x00")
+			if alias {
+				if err := os.Symlink(external, filepath.Join(workdir, ".crabbox")); err != nil {
+					t.Fatal(err)
+				}
+				out, err := exec.Command("/bin/sh", "-c", remoteGitSeed(workdir, plan)).CombinedOutput()
+				if err == nil || !strings.Contains(string(out), "canonical directory") {
+					t.Fatalf("alias admitted: %v\n%s", err, out)
+				}
+				if _, err := os.Lstat(filepath.Join(workdir, ".git")); !os.IsNotExist(err) {
+					t.Fatalf("published metadata despite alias: %v", err)
+				}
+				requireOriginFile(t, filepath.Join(external, "sync-manifest"), "external\x00")
+			} else {
+				mustWriteTestFile(t, filepath.Join(workdir, ".crabbox", "sync-manifest"), "keep\x00")
+				path := filepath.Join(t.TempDir(), "alias")
+				if err := os.Symlink(workdir, path); err != nil {
+					t.Fatal(err)
+				}
+				runOriginScript(t, remoteGitSeed(path, plan), "")
+				requireOriginFile(t, filepath.Join(workdir, ".git", "crabbox", "sync-manifest"), "keep\x00")
+			}
+		})
+	}
+}
+
+func TestOriginSeedReusePrunerRejectsSymlinkAncestors(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX/WSL selected script fixture")
+	}
+	for _, target := range []SSHTarget{{}, {TargetOS: targetWindows, WindowsMode: windowsModeWSL2}} {
+		t.Run(fmt.Sprintf("target-%s", target.WindowsMode), func(t *testing.T) {
+			f := newGitCoherenceFixture(t)
+			workdir := filepath.Join(t.TempDir(), "raw")
+			mustWriteTestFile(t, filepath.Join(workdir, "keep"), "keep")
+			runOriginScript(t, remoteGitSeed(workdir, f.plan(t, f.b)), "")
+			meta := coherenceMetaDir(t, workdir)
+			external := t.TempDir()
+			mustWriteTestFile(t, filepath.Join(external, "sentinel"), "outside")
+			if err := os.Symlink(external, filepath.Join(workdir, "escape")); err != nil {
+				t.Fatal(err)
+			}
+			mustWriteTestFile(t, filepath.Join(meta, "sync-manifest"), "escape/sentinel\x00")
+			const token = "00000000000000000000000000000009"
+			out := runOriginScript(t, remoteWriteSyncManifestsNewForTarget(target, workdir, token), syncManifestInputForTarget(target, nil, nil))
+			raw := strings.Contains(out, "crabbox-git-seed raw-workspace\n")
+			if !raw {
+				t.Fatal("reuse staging lost raw origin")
+			}
+			output, err := exec.Command("/bin/sh", "-c", remotePruneSyncManifestForTargetMode(target, workdir, token, raw)).CombinedOutput()
+			if err == nil {
+				t.Fatalf("symlink ancestor admitted: %s", output)
+			}
+			requireOriginFile(t, filepath.Join(external, "sentinel"), "outside")
+		})
+	}
+}
+
+func TestWindowsOriginSeedRejectsRawMetadataJunction(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native junction execution requires Windows")
+	}
+	f := newGitCoherenceFixture(t)
+	workdir := filepath.Join(t.TempDir(), "raw")
+	mustWriteTestFile(t, filepath.Join(workdir, "keep"), "keep")
+	external := t.TempDir()
+	mustWriteTestFile(t, filepath.Join(external, "sync-manifest"), "outside\x00")
+	if out, err := exec.Command("cmd", "/c", "mklink", "/J", filepath.Join(workdir, ".crabbox"), external).CombinedOutput(); err != nil {
+		t.Fatalf("junction: %v\n%s", err, out)
+	}
+	out, err := runDecodedWindowsPowerShell(t, windowsGitSeed(workdir, f.plan(t, f.b)))
+	if err == nil || !strings.Contains(string(out), "raw metadata") {
+		t.Fatalf("junction admitted: %v\n%s", err, out)
+	}
+	requireOriginFile(t, filepath.Join(external, "sync-manifest"), "outside\x00")
+	if _, err := os.Lstat(filepath.Join(workdir, ".git")); !os.IsNotExist(err) {
+		t.Fatalf("published metadata despite junction: %v", err)
+	}
+}
+
+func TestOriginSeedDeletionGuardDeduplicatesNULPaths(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX interpreter fixture")
+	}
+	for _, interpreter := range []string{"python3", "perl"} {
+		t.Run(interpreter, func(t *testing.T) {
+			tools := t.TempDir()
+			for _, name := range []string{"cat", interpreter} {
+				mustWriteTestCommandWrapper(t, tools, name)
+			}
+			meta := t.TempDir()
+			const token = "00000000000000000000000000000010"
+			var omissions, deletions strings.Builder
+			for i := 0; i < 200; i++ {
+				fmt.Fprintf(&omissions, "absent/%03d\nline\x00", i)
+				fmt.Fprintf(&deletions, "absent/%03d\nline\x00", i)
+				if i < 199 {
+					fmt.Fprintf(&deletions, "deleted/%03d\x00deleted/%03d\x00", i, i)
+				}
+			}
+			record := filepath.Join(meta, remoteCoherenceOmissionsName(token))
+			mustWriteTestFile(t, record, omissions.String())
+			deleted := filepath.Join(meta, "deleted")
+			mustWriteTestFile(t, deleted, deletions.String())
+			script := "set -e\nmeta_dir=" + shellQuote(meta) + "\nexpected_token=" + shellQuote(token) + "\ngit_status=" + shellQuote(filepath.Join(meta, "status")) + "\n" +
+				remoteOriginSeedDeletionGuard("", true, "cat "+shellQuote(deleted))
+			run := func() ([]byte, error) {
+				cmd := exec.Command("/bin/bash", "--noprofile", "--norc", "-c", script)
+				cmd.Env = append(os.Environ(), "PATH="+tools)
+				return cmd.CombinedOutput()
+			}
+			if out, err := run(); err != nil {
+				t.Fatalf("duplicate paths counted twice: %v\n%s", err, out)
+			}
+			mustWriteTestFile(t, deleted, deletions.String()+"deleted/199\x00")
+			if out, err := run(); exitCode(err) != 66 || !strings.Contains(string(out), "200 tracked deletions") {
+				t.Fatalf("real deletion guard: %v\n%s", err, out)
+			}
+			mustWriteTestFile(t, record, "unterminated")
+			if out, err := run(); err == nil {
+				t.Fatalf("malformed omission record admitted: %s", out)
+			}
+			if err := os.Remove(record); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := run(); exitCode(err) != 67 {
+				t.Fatalf("missing omission record admitted: %v\n%s", err, out)
+			}
+		})
+	}
+}
+
+func TestRemoteGitCoherenceLateFailurePreservesOwnershipForNewToken(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX finalize fixture")
+	}
+	f := newGitCoherenceFixture(t)
+	for _, failure := range []string{"fingerprint", "complete"} {
+		t.Run(failure, func(t *testing.T) {
+			workdir := f.workspace(t, f.a, true)
+			plan := f.plan(t, f.b)
+			mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "B\n")
+			meta := coherenceMetaDir(t, workdir)
+			mustWriteTestFile(t, filepath.Join(meta, "sync-manifest"), "old-owned\x00")
+			const first = "00000000000000000000000000000011"
+			const next = "00000000000000000000000000000012"
+			stageCoherenceFinalize(t, workdir, first)
+			stageCoherenceFinalize(t, workdir, next)
+			mustWriteTestFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(first)), "first\x00")
+			mustWriteTestFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(next)), "next\x00")
+			env := []string{"PATH=" + coherenceFailureTools(t, plan.Target) + string(os.PathListSeparator) + os.Getenv("PATH"), "CRABBOX_FAIL_MV=" + failure}
+			if out, err := runCoherenceFinalize(workdir, plan, first, "first", env...); err == nil {
+				t.Fatalf("failure not injected: %s", out)
+			}
+			requireOriginFile(t, filepath.Join(meta, "sync-manifest"), "old-owned\x00")
+			requireOriginFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(next)), "next\x00")
+			if out, err := runCoherenceFinalize(workdir, plan, next, "next"); err != nil {
+				t.Fatalf("new token retry: %v\n%s", err, out)
+			}
+			requireOriginFile(t, filepath.Join(meta, "sync-finalize-complete-token"), next)
+			requireOriginFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(first)), "first\x00")
+			if _, err := os.Stat(filepath.Join(meta, remoteCoherenceOmissionsName(next))); !os.IsNotExist(err) {
+				t.Fatalf("completed next omissions: %v", err)
+			}
+			backups, err := filepath.Glob(filepath.Join(meta, "sync-finalize-backup.*"))
+			if err != nil || len(backups) != 0 {
+				t.Fatalf("settled backups remain: %v %v", backups, err)
+			}
+		})
+	}
+}
+
+func TestOriginSeedMetadataReplacementClearsProvenance(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX seed metadata fixture")
+	}
+	f := newGitCoherenceFixture(t)
+	workdir := filepath.Join(t.TempDir(), "raw")
+	mustWriteTestFile(t, filepath.Join(workdir, "keep"), "keep")
+	runOriginScript(t, remoteGitSeed(workdir, f.plan(t, f.b)), "")
+	fresh := f.workspace(t, f.b, false)
+	if err := os.Rename(filepath.Join(workdir, ".git"), filepath.Join(workdir, "retained-old-metadata")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(fresh, ".git"), filepath.Join(workdir, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	out := runOriginScript(t, remoteWriteSyncManifestsNew(workdir, "00000000000000000000000000000013"), syncManifestInputForTarget(SSHTarget{}, nil, nil))
+	if strings.Contains(out, "crabbox-git-seed raw-workspace") {
+		t.Fatalf("new metadata inherited old provenance: %q", out)
+	}
+}
+
+func TestOriginSeedInitialAbsencesRejectObstructions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX origin seed fixture")
+	}
+	for _, obstruction := range []string{"directories", "parent-file", "symlink-parent"} {
+		t.Run(obstruction, func(t *testing.T) {
+			plan, workdir, absent, _ := newOriginAbsenceFixture(t)
+			parent := filepath.Join(workdir, "absent")
+			switch obstruction {
+			case "directories":
+				for _, path := range absent {
+					if err := os.MkdirAll(filepath.Join(workdir, path), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+			case "parent-file":
+				mustWriteTestFile(t, parent, "obstructed")
+			case "symlink-parent":
+				external := t.TempDir()
+				for _, path := range absent {
+					mustWriteTestFile(t, filepath.Join(external, filepath.Base(path)), "external")
+				}
+				if err := os.Symlink(external, parent); err != nil {
+					t.Fatal(err)
+				}
+			}
+			runOriginScript(t, remoteGitSeed(workdir, plan), "")
+			meta := coherenceMetaDir(t, workdir)
+			requireOriginFile(t, filepath.Join(meta, remoteOriginSeedInitialAbsencesName()), "")
+			if obstruction == "directories" {
+				for _, path := range absent {
+					if err := os.Remove(filepath.Join(workdir, path)); err != nil {
+						t.Fatal(err)
+					}
+				}
+			} else if err := os.Remove(parent); err != nil {
+				t.Fatal(err)
+			}
+			const token = "00000000000000000000000000000014"
+			stageCoherenceFinalize(t, workdir, token)
+			runOriginScript(t, remoteCaptureCoherenceOmissions(workdir, token), strings.Join(absent, "\x00")+"\x00")
+			requireOriginFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(token)), "")
+			out, err := exec.Command("/bin/sh", "-c", remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: token, Coherence: plan, CoherenceOmissions: true})).CombinedOutput()
+			if exitCode(err) != 66 {
+				t.Fatalf("later removal of obstruction was excused: %v\n%s", err, out)
+			}
+		})
+	}
+}
+
+func TestRemoteGitCoherenceFailedSyncInvalidatesOldFingerprint(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX finalize fixture")
+	}
+	f := newGitCoherenceFixture(t)
+	workdir := f.workspace(t, f.a, true)
+	plan := f.plan(t, f.a)
+	meta := coherenceMetaDir(t, workdir)
+	const old = "00000000000000000000000000000015"
+	const next = "00000000000000000000000000000016"
+	stageCoherenceFinalize(t, workdir, old)
+	if out, err := runCoherenceFinalize(workdir, plan, old, "old-fingerprint"); err != nil {
+		t.Fatalf("initial: %v\n%s", err, out)
+	}
+	mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "changed by failed sync\n")
+	stageCoherenceFinalize(t, workdir, next)
+	env := []string{"PATH=" + coherenceFailureTools(t, plan.Target) + string(os.PathListSeparator) + os.Getenv("PATH"), "CRABBOX_FAIL_MV=complete"}
+	if out, err := runCoherenceFinalize(workdir, plan, next, "next", env...); err == nil {
+		t.Fatalf("failure not injected: %s", out)
+	}
+	requireOriginFile(t, filepath.Join(meta, "sync-manifest"), "tracked.txt\x00")
+	requireOriginFile(t, filepath.Join(meta, "sync-finalize-token"), old)
+	if got := readCoherentFingerprint(t, workdir, plan); got != "" {
+		t.Fatalf("failed transfer certified old fingerprint: %q", got)
+	}
+}
+
+func TestOriginSeedInitialFilterUsesPerlAndCandidateIndex(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX interpreter fixture")
+	}
+	plan, workdir, absent, _ := newOriginAbsenceFixture(t)
+	candidate := plan.RemoteURL
+	meta := filepath.Join(candidate, ".git", "crabbox")
+	if err := os.MkdirAll(meta, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tools := t.TempDir()
+	for _, name := range []string{"git", "rm"} {
+		mustWriteTestCommandWrapper(t, tools, name)
+	}
+	marker := filepath.Join(t.TempDir(), "perl-used")
+	mustWriteTestCommandWrapperWithMarker(t, tools, "perl", marker)
+	script := "set -e\n" + "tmp=" + shellQuote(candidate) + "\nworkdir=" + shellQuote(workdir) + "\n" + remoteCaptureInitialOriginAbsences()
+	cmd := exec.Command("/bin/bash", "--noprofile", "--norc", "-c", script)
+	cmd.Env = append(os.Environ(), "PATH="+tools, "GIT_INDEX_FILE="+filepath.Join(t.TempDir(), "unrelated-index"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("initial Perl filter: %v\n%s", err, out)
+	}
+	requireOriginFile(t, filepath.Join(meta, remoteOriginSeedInitialAbsencesName()), strings.Join(absent, "\x00")+"\x00")
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("Perl not used: %v", err)
+	}
+}
+
+func TestRemoteFinalizeSyncSnapshotFailureInvalidatesCompletion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX finalize fixture")
+	}
+	f := newGitCoherenceFixture(t)
+	workdir := f.workspace(t, f.a, true)
+	plan := f.plan(t, f.a)
+	meta := coherenceMetaDir(t, workdir)
+	const old = "00000000000000000000000000000017"
+	const next = "00000000000000000000000000000018"
+	stageCoherenceFinalize(t, workdir, old)
+	if out, err := runCoherenceFinalize(workdir, plan, old, "old"); err != nil {
+		t.Fatalf("initial: %v\n%s", err, out)
+	}
+	mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "changed by failed sync\n")
+	stageCoherenceFinalize(t, workdir, next)
+	tools := t.TempDir()
+	mustWriteTestFailingCommand(t, tools, "mktemp", 95)
+	out, err := runCoherenceFinalize(workdir, plan, next, "next", "PATH="+tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if exitCode(err) != 95 {
+		t.Fatalf("snapshot failure not injected: %v\n%s", err, out)
+	}
+	requireOriginFile(t, filepath.Join(meta, "sync-manifest"), "tracked.txt\x00")
+	requireOriginFile(t, filepath.Join(meta, "sync-finalize-token"), old)
+	if got := readCoherentFingerprint(t, workdir, plan); got != "" {
+		t.Fatalf("snapshot failure retained old certificate: %q", got)
+	}
+}
+
+func TestOriginSeedProvenanceRejectsMetadataParentAlias(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX metadata alias fixture")
+	}
+	f := newGitCoherenceFixture(t)
+	workdir := filepath.Join(t.TempDir(), "raw")
+	mustWriteTestFile(t, filepath.Join(workdir, "keep"), "keep")
+	runOriginScript(t, remoteGitSeed(workdir, f.plan(t, f.b)), "")
+	meta := coherenceMetaDir(t, workdir)
+	if err := os.Rename(meta, meta+"-retained"); err != nil {
+		t.Fatal(err)
+	}
+	external := t.TempDir()
+	mustWriteTestFile(t, filepath.Join(external, remoteOriginSeedInitialAbsencesName()), "excluded\x00")
+	mustWriteTestFile(t, filepath.Join(external, "sync-manifest"), "outside\x00")
+	if err := os.Symlink(external, meta); err != nil {
+		t.Fatal(err)
+	}
+	const token = "00000000000000000000000000000019"
+	cases := []struct{ name, script, input string }{
+		{"reuse", remoteGitSeed(workdir, f.plan(t, f.b)), ""},
+		{"stage-posix", remoteWriteSyncManifestsNew(workdir, token), syncManifestInputForTarget(SSHTarget{}, nil, nil)},
+		{"stage-wsl", remoteWriteSyncManifestsNewForTarget(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, workdir, token), syncManifestInputForTarget(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, nil, nil)},
+		{"capture", remoteCaptureCoherenceOmissions(workdir, token), "excluded\x00"},
+		{"finalize", remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: token, CoherenceOmissions: true}), ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command("/bin/sh", "-c", tc.script)
+			cmd.Stdin = strings.NewReader(tc.input)
+			out, err := cmd.CombinedOutput()
+			if exitCode(err) != 67 || !strings.Contains(string(out), "not a canonical directory") {
+				t.Fatalf("parent alias admitted: %v\n%s", err, out)
+			}
+			requireOriginFile(t, filepath.Join(external, "sync-manifest"), "outside\x00")
+			for _, name := range []string{remoteSyncPendingManifestName(token), remoteSyncPendingDeletedName(token), remoteCoherenceOmissionsName(token)} {
+				if _, err := os.Stat(filepath.Join(external, name)); !os.IsNotExist(err) {
+					t.Fatalf("alias wrote external metadata %s: %v", name, err)
+				}
+			}
+		})
 	}
 }

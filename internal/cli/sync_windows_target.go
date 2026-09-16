@@ -216,6 +216,16 @@ try {
     $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $seedManifest)
     Set-Content -LiteralPath $seedManifest -Value $null -NoNewline
     $legacyMetadata = Join-Path $workdir '.crabbox'
+    if (Test-Path -LiteralPath $legacyMetadata) {
+      $legacyParent = Get-Item -Force -LiteralPath $legacyMetadata
+      if (-not $legacyParent.PSIsContainer -or ($legacyParent.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw 'raw metadata is not a canonical directory'
+      }
+      $expectedMetadata = Join-Path (Get-CrabboxFinalDirectoryPath $workdir) '.crabbox'
+      if (-not [string]::Equals((Get-CrabboxFinalDirectoryPath $legacyMetadata), $expectedMetadata, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'raw metadata is not a canonical directory'
+      }
+    }
     foreach ($name in @('sync-manifest', 'sync-fingerprint', 'git-hydrate-base')) {
       $legacy = Join-Path $legacyMetadata $name
       $destination = Join-Path (Join-Path $tmp '.git/crabbox') $name
