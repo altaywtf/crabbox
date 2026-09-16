@@ -4548,11 +4548,10 @@ func TestWindowsGitSeedChecksGitBeforeInstallingClone(t *testing.T) {
 	cloneCheck := strings.Index(decoded, `if ($LASTEXITCODE -ne 0) { throw "Git seed clone failed" }`)
 	checkout := strings.Index(decoded, "& git -C $tmp checkout")
 	checkoutCheck := strings.Index(decoded, `if ($LASTEXITCODE -ne 0) { throw "Git seed checkout failed" }`)
-	removeWorkdir := strings.Index(decoded, "Remove-Item -LiteralPath $workdir -Recurse -Force")
-	moveClone := strings.Index(decoded, "Move-Item -LiteralPath $tmp -Destination $workdir")
+	moveMetadata := strings.Index(decoded, "[IO.Directory]::Move((Join-Path $tmp '.git'), $metadata)")
 	if clone < 0 || cloneCheck <= clone || checkout <= cloneCheck || checkoutCheck <= checkout ||
-		removeWorkdir <= checkoutCheck || moveClone <= removeWorkdir {
-		t.Fatalf("Windows seed can install before clone and checkout verification:\n%s", decoded)
+		moveMetadata <= checkoutCheck {
+		t.Fatalf("Windows seed can attach metadata before clone and checkout verification:\n%s", decoded)
 	}
 	for _, want := range []string{
 		"rev-parse --show-toplevel",
@@ -4565,6 +4564,9 @@ func TestWindowsGitSeedChecksGitBeforeInstallingClone(t *testing.T) {
 		"Test-Path -LiteralPath $index -PathType Leaf",
 		"git -C $Path write-tree",
 		"remote set-url origin",
+		"workspace has unexpected Git metadata",
+		"$workspaceEmpty = -not (Test-Path -LiteralPath $workdir)",
+		"sync-manifest', 'sync-fingerprint', 'git-hydrate-base'",
 		`if ($tmp -and (Test-Path -LiteralPath $tmp))`,
 	} {
 		if !strings.Contains(decoded, want) {
@@ -4590,8 +4592,16 @@ func TestWindowsGitSeedChecksGitBeforeInstallingClone(t *testing.T) {
 	}
 	verifyWorkspace := strings.Index(decoded, "if (-not (Test-UsableGitWorkspace $tmp))")
 	verifyTree := strings.Index(decoded, "if ($expectedTree) {")
-	if verifyWorkspace <= checkoutCheck || verifyTree <= verifyWorkspace || removeWorkdir <= verifyTree {
-		t.Fatalf("Windows seed can replace a workspace before the candidate index and tree are verified:\n%s", decoded)
+	if verifyWorkspace <= checkoutCheck || verifyTree <= verifyWorkspace || moveMetadata <= verifyTree {
+		t.Fatalf("Windows seed can attach metadata before the candidate index and tree are verified:\n%s", decoded)
+	}
+	if strings.Contains(decoded, "Remove-Item -LiteralPath $workdir -Recurse -Force") {
+		t.Fatalf("Windows seed must preserve raw workspace files:\n%s", decoded)
+	}
+	emptyWorkspace := strings.Index(decoded, "if ($workspaceEmpty) {")
+	moveWorkspace := strings.Index(decoded, "[IO.Directory]::Move($tmp, $workdir)")
+	if emptyWorkspace <= verifyTree || moveWorkspace <= emptyWorkspace || moveMetadata <= moveWorkspace {
+		t.Fatalf("Windows seed does not distinguish an empty checkout from raw workspace metadata:\n%s", decoded)
 	}
 }
 
@@ -4699,7 +4709,7 @@ func requireWindowsGitWorkspaceState(t *testing.T, workdir string, plan gitCoher
 	}
 }
 
-func TestWindowsGitSeedReplacesUnusableExactRootsAfterVerifiedClone(t *testing.T) {
+func TestWindowsGitSeedPreservesUnusableExactRootsAfterVerifiedClone(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("native Windows PowerShell execution is covered by Windows CI")
 	}
@@ -4747,15 +4757,68 @@ func TestWindowsGitSeedReplacesUnusableExactRootsAfterVerifiedClone(t *testing.T
 				}
 			}
 
-			if out, err := runDecodedWindowsPowerShell(t, windowsGitSeed(workdir, plan)); err != nil {
-				t.Fatalf("verified seed failed: %v\n%s", err, out)
+			if out, err := runDecodedWindowsPowerShell(t, windowsGitSeed(workdir, plan)); err == nil || !strings.Contains(string(out), "workspace has unexpected Git metadata") {
+				t.Fatalf("verified seed did not refuse unusable root: %v\n%s", err, out)
 			}
-			requireWindowsGitWorkspaceState(t, workdir, plan)
-			if _, err := os.Stat(marker); !os.IsNotExist(err) {
-				t.Fatalf("verified seed did not replace unusable root: %v", err)
+			if got, readErr := os.ReadFile(marker); readErr != nil || string(got) != "preserve\n" {
+				t.Fatalf("refused seed changed existing root: data=%q err=%v", got, readErr)
 			}
 		})
 	}
+}
+
+func TestWindowsGitSeedPreservesRawWorkspaceMetadataOwnership(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows PowerShell execution is covered by Windows CI")
+	}
+	f := newGitCoherenceFixture(t)
+	plan := f.plan(t, f.b)
+
+	t.Run("raw manifest", func(t *testing.T) {
+		workdir := filepath.Join(t.TempDir(), "raw-workspace")
+		mustWriteTestFile(t, filepath.Join(workdir, "node_modules", "fixture.txt"), "dependency\n")
+		mustWriteTestFile(t, filepath.Join(workdir, ".crabbox", "sync-manifest"), "managed.txt\x00")
+		if out, err := runDecodedWindowsPowerShell(t, windowsGitSeed(workdir, plan)); err != nil {
+			t.Fatalf("attach raw workspace metadata: %v\n%s", err, out)
+		}
+		requireWindowsGitWorkspaceState(t, workdir, plan)
+		for name, want := range map[string]string{
+			"node_modules/fixture.txt":   "dependency\n",
+			".git/crabbox/sync-manifest": "managed.txt\x00",
+		} {
+			if got, err := os.ReadFile(filepath.Join(workdir, name)); err != nil || string(got) != want {
+				t.Fatalf("raw workspace did not preserve %s: data=%q err=%v", name, got, err)
+			}
+		}
+	})
+
+	t.Run("raw no manifest", func(t *testing.T) {
+		workdir := filepath.Join(t.TempDir(), "raw-no-manifest")
+		mustWriteTestFile(t, filepath.Join(workdir, "preserve.txt"), "workspace\n")
+		if out, err := runDecodedWindowsPowerShell(t, windowsGitSeed(workdir, plan)); err != nil {
+			t.Fatalf("attach raw workspace metadata without manifest: %v\n%s", err, out)
+		}
+		if got, err := os.ReadFile(filepath.Join(workdir, ".git", "crabbox", "sync-manifest")); err != nil || len(got) != 0 {
+			t.Fatalf("raw workspace inherited candidate manifest: data=%q err=%v", got, err)
+		}
+		if got, err := os.ReadFile(filepath.Join(workdir, "preserve.txt")); err != nil || string(got) != "workspace\n" {
+			t.Fatalf("raw workspace changed: data=%q err=%v", got, err)
+		}
+	})
+
+	t.Run("abandoned private staging", func(t *testing.T) {
+		parent := t.TempDir()
+		staging := filepath.Join(parent, ".seed-abandoned")
+		mustWriteTestFile(t, filepath.Join(staging, "prepublication-marker"), "interrupted\n")
+		workdir := filepath.Join(parent, "raw-workspace")
+		if out, err := runDecodedWindowsPowerShell(t, windowsGitSeed(workdir, plan)); err != nil {
+			t.Fatalf("seed after abandoned private staging: %v\n%s", err, out)
+		}
+		requireWindowsGitWorkspaceState(t, workdir, plan)
+		if got, err := os.ReadFile(filepath.Join(staging, "prepublication-marker")); err != nil || string(got) != "interrupted\n" {
+			t.Fatalf("seed touched abandoned private staging: data=%q err=%v", got, err)
+		}
+	})
 }
 
 func TestWindowsGitCoherenceSupportsDetachedSparseSplitAndLinkedIndexes(t *testing.T) {
@@ -5002,11 +5065,12 @@ func TestRemoteGitSeedRemovesFailedCheckout(t *testing.T) {
 	got := remoteGitSeed("/work/repo", gitCoherencePlan{RemoteURL: "https://github.com/openclaw/crabbox.git", Target: "missing-sha", Tree: "tree", Branch: "main"})
 	for _, want := range []string{
 		"git -C \"$tmp\" checkout --quiet --detach",
-		"cleanup_seed() { rm -rf -- \"$tmp\"; rm -f -- \"$transport_error\"; }",
+		"seed_root=",
+		"workspace has unexpected Git metadata",
+		"mv -n \"$tmp/.git\" \"$workdir\"",
 		"trap cleanup_seed EXIT",
 		"cat \"$transport_error\" >&2",
 		"exit 78",
-		"mv -- \"$tmp\" \"$workdir\"",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("remoteGitSeed missing %q in %q", want, got)
@@ -5019,6 +5083,9 @@ func TestRemoteGitSeedRemovesFailedCheckout(t *testing.T) {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("remoteGitSeed retained origin policy %q in %q", forbidden, got)
 		}
+	}
+	if strings.Contains(got, "rm -rf -- \"$workdir\"") {
+		t.Fatalf("remoteGitSeed must not replace a raw workspace: %q", got)
 	}
 }
 
@@ -5535,6 +5602,7 @@ func TestRemoteGitSeedLocalCanary(t *testing.T) {
 	runGit(t, source, "config", "user.email", "test@example.com")
 	runGit(t, source, "config", "user.name", "Test")
 	mustWriteTestFile(t, filepath.Join(source, "proof.txt"), "safe seed\n")
+	mustWriteTestFile(t, filepath.Join(source, "preserved-upstream.txt"), "upstream managed\n")
 	runGit(t, source, "add", ".")
 	runGit(t, source, "commit", "-m", "seed")
 	head := gitOutput(source, "rev-parse", "HEAD")
@@ -5558,6 +5626,13 @@ func TestRemoteGitSeedLocalCanary(t *testing.T) {
 		}
 		if len(staging) != 0 {
 			t.Fatalf("%s left seed staging files: %v", label, staging)
+		}
+	}
+	failSeed := func(label, workdir string) {
+		t.Helper()
+		seed := exec.Command("bash", "-lc", remoteGitSeed(workdir, plan))
+		if out, err := seed.CombinedOutput(); err == nil || !strings.Contains(string(out), "crabbox-git-seed phase=publish") {
+			t.Fatalf("%s: expected protected publish failure, err=%v output=%s", label, err, out)
 		}
 	}
 	requireSeeded := func(workdir string) {
@@ -5599,16 +5674,253 @@ func TestRemoteGitSeedLocalCanary(t *testing.T) {
 		t.Fatalf("valid reusable workspace was replaced: data=%q err=%v", got, err)
 	}
 
+	rawWorkdir := filepath.Join(root, "raw-workdir")
+	mustWriteTestFile(t, filepath.Join(rawWorkdir, "node_modules", "fixture.txt"), "dependency\n")
+	mustWriteTestFile(t, filepath.Join(rawWorkdir, "dist", "proof.txt"), "evidence\n")
+	mustWriteTestFile(t, filepath.Join(rawWorkdir, ".crabbox", "sync-manifest"), "tracked.txt\x00")
+	mustWriteTestFile(t, filepath.Join(rawWorkdir, ".crabbox", "sync-fingerprint"), "raw-fingerprint")
+	runSeed("attach metadata to raw workspace", rawWorkdir)
+	requireSeeded(rawWorkdir)
+	for name, want := range map[string]string{
+		"node_modules/fixture.txt":      "dependency\n",
+		"dist/proof.txt":                "evidence\n",
+		".git/crabbox/sync-manifest":    "tracked.txt\x00",
+		".git/crabbox/sync-fingerprint": "raw-fingerprint",
+	} {
+		if got, err := os.ReadFile(filepath.Join(rawWorkdir, name)); err != nil || string(got) != want {
+			t.Fatalf("raw workspace did not preserve %s: data=%q err=%v", name, got, err)
+		}
+	}
+
+	branchlessWorkdir := filepath.Join(root, "branchless-raw-workdir")
+	mustWriteTestFile(t, filepath.Join(branchlessWorkdir, "stale.txt"), "managed\n")
+	mustWriteTestFile(t, filepath.Join(branchlessWorkdir, "node_modules", "fixture.txt"), "dependency\n")
+	mustWriteTestFile(t, filepath.Join(branchlessWorkdir, ".crabbox", "sync-manifest"), "stale.txt\x00")
+	branchless := plan
+	branchless.Branch = ""
+	if out, err := exec.Command("bash", "-lc", remoteGitSeed(branchlessWorkdir, branchless)).CombinedOutput(); err != nil {
+		t.Fatalf("attach branchless metadata to raw workspace: %v\n%s", err, out)
+	}
+	if manifest, err := os.ReadFile(filepath.Join(branchlessWorkdir, ".git", "crabbox", "sync-manifest")); err != nil || string(manifest) != "stale.txt\x00" {
+		t.Fatalf("raw manifest did not retain authority: data=%q err=%v", manifest, err)
+	}
+	token := strings.Repeat("0", 32)
+	write := exec.Command("bash", "-lc", remoteWriteSyncManifestsNew(branchlessWorkdir, token))
+	write.Stdin = strings.NewReader("0\n0\n")
+	if out, err := write.CombinedOutput(); err != nil {
+		t.Fatalf("write branchless manifest: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("bash", "-lc", remotePruneSyncManifest(branchlessWorkdir, token)).CombinedOutput(); err != nil {
+		t.Fatalf("prune branchless manifest: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(branchlessWorkdir, "stale.txt")); !os.IsNotExist(err) {
+		t.Fatalf("branchless prune retained managed stale file: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(branchlessWorkdir, "node_modules", "fixture.txt")); err != nil || string(got) != "dependency\n" {
+		t.Fatalf("branchless prune touched unmanaged dependency: data=%q err=%v", got, err)
+	}
+
+	rawNoManifestWorkdir := filepath.Join(root, "raw-no-manifest-workdir")
+	mustWriteTestFile(t, filepath.Join(rawNoManifestWorkdir, "preserved-upstream.txt"), "raw workspace\n")
+	if out, err := exec.Command("bash", "-lc", remoteGitSeed(rawNoManifestWorkdir, branchless)).CombinedOutput(); err != nil {
+		t.Fatalf("attach branchless metadata without a raw manifest: %v\n%s", err, out)
+	}
+	write = exec.Command("bash", "-lc", remoteWriteSyncManifestsNew(rawNoManifestWorkdir, token))
+	write.Stdin = strings.NewReader("0\n0\n")
+	if out, err := write.CombinedOutput(); err != nil {
+		t.Fatalf("write raw-no-manifest branchless manifest: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("bash", "-lc", remoteSeedSyncManifestFromGit(rawNoManifestWorkdir)).CombinedOutput(); err != nil {
+		t.Fatalf("seed raw-no-manifest branchless prune manifest: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("bash", "-lc", remotePruneSyncManifest(rawNoManifestWorkdir, token)).CombinedOutput(); err != nil {
+		t.Fatalf("prune raw-no-manifest branchless manifest: %v\n%s", err, out)
+	}
+	if got, err := os.ReadFile(filepath.Join(rawNoManifestWorkdir, "preserved-upstream.txt")); err != nil || string(got) != "raw workspace\n" {
+		t.Fatalf("candidate manifest claimed raw workspace file: data=%q err=%v", got, err)
+	}
+
+	interruptedWorkdir := filepath.Join(root, "interrupted-before-publish")
+	mustWriteTestFile(t, filepath.Join(interruptedWorkdir, "preserve.txt"), "workspace\n")
+	barrierBin := filepath.Join(root, "barrier-bin")
+	if err := os.Mkdir(barrierBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	barrierReady := filepath.Join(root, "barrier-ready")
+	barrierRelease := filepath.Join(root, "barrier-release")
+	barrierDone := filepath.Join(root, "barrier-done")
+	barrierScript := "#!/bin/sh\n: > " + shellQuote(barrierReady) + "\nwhile [ ! -f " + shellQuote(barrierRelease) + " ]; do sleep 0.01; done\n/usr/bin/find \"$@\"\n: > " + shellQuote(barrierDone) + "\n"
+	if err := os.WriteFile(filepath.Join(barrierBin, "find"), []byte(barrierScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	interruptedSeed := exec.Command("bash", "-c", remoteGitSeed(interruptedWorkdir, plan))
+	interruptedEnv := make([]string, 0, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "PATH=") {
+			interruptedEnv = append(interruptedEnv, entry)
+		}
+	}
+	interruptedSeed.Env = append(interruptedEnv, "PATH="+barrierBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := interruptedSeed.Start(); err != nil {
+		t.Fatal(err)
+	}
+	interruptedCleaned := false
+	releaseInterrupted := func() {
+		if err := os.WriteFile(barrierRelease, nil, 0o644); err != nil {
+			t.Errorf("release interrupted seed barrier: %v", err)
+			return
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			if _, err := os.Stat(barrierDone); err == nil {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Errorf("interrupted seed barrier descendant did not drain")
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	defer func() {
+		if interruptedCleaned {
+			return
+		}
+		if interruptedSeed.ProcessState == nil {
+			_ = interruptedSeed.Process.Kill()
+			_ = interruptedSeed.Wait()
+		}
+		releaseInterrupted()
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(barrierReady); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("seed did not reach prepublication barrier")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := interruptedSeed.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if err := interruptedSeed.Wait(); err == nil {
+		t.Fatal("killed seed completed successfully")
+	}
+	releaseInterrupted()
+	interruptedCleaned = true
+	abandonedStaging, err := filepath.Glob(filepath.Join(root, ".seed.*"))
+	if err != nil || len(abandonedStaging) != 1 {
+		t.Fatalf("killed seed did not leave one private staging root: paths=%v err=%v", abandonedStaging, err)
+	}
+	if out, err := exec.Command("bash", "-lc", remoteGitSeed(interruptedWorkdir, plan)).CombinedOutput(); err != nil {
+		t.Fatalf("seed after interrupted private staging: %v\n%s", err, out)
+	}
+	requireSeeded(interruptedWorkdir)
+	if got, err := os.ReadFile(filepath.Join(interruptedWorkdir, "preserve.txt")); err != nil || string(got) != "workspace\n" {
+		t.Fatalf("next seed changed interrupted workspace: data=%q err=%v", got, err)
+	}
+	if _, err := os.Stat(abandonedStaging[0]); err != nil {
+		t.Fatalf("next seed changed interrupted private staging: %v", err)
+	}
+	if err := os.RemoveAll(abandonedStaging[0]); err != nil {
+		t.Fatal(err)
+	}
+
+	appearingMetadataWorkdir := filepath.Join(root, "appearing-metadata-workdir")
+	mustWriteTestFile(t, filepath.Join(appearingMetadataWorkdir, "preserve.txt"), "workspace\n")
+	findBin := filepath.Join(root, "find-bin")
+	if err := os.Mkdir(findBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	findReady := filepath.Join(root, "find-ready")
+	findRelease := filepath.Join(root, "find-release")
+	findScript := "#!/bin/sh\n: > " + shellQuote(findReady) + "\nwhile [ ! -f " + shellQuote(findRelease) + " ]; do sleep 0.01; done\nexec /usr/bin/find \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(findBin, "find"), []byte(findScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seed := exec.Command("bash", "-c", remoteGitSeed(appearingMetadataWorkdir, plan))
+	seedEnv := make([]string, 0, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "PATH=") {
+			seedEnv = append(seedEnv, entry)
+		}
+	}
+	seed.Env = append(seedEnv, "PATH="+findBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	var seedOutput bytes.Buffer
+	seed.Stdout = &seedOutput
+	seed.Stderr = &seedOutput
+	if err := seed.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = os.WriteFile(findRelease, nil, 0o644)
+		_ = seed.Wait()
+	}()
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(findReady); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("seed did not reach post-verification workspace check")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mustWriteTestFile(t, filepath.Join(appearingMetadataWorkdir, ".git", "late-sentinel"), "preserve\n")
+	if err := os.WriteFile(findRelease, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.Wait(); err == nil || !strings.Contains(seedOutput.String(), "workspace has unexpected Git metadata") {
+		t.Fatalf("seed did not refuse metadata appearing after candidate verification: err=%v output=%s", err, seedOutput.String())
+	}
+	if got, err := os.ReadFile(filepath.Join(appearingMetadataWorkdir, ".git", "late-sentinel")); err != nil || string(got) != "preserve\n" {
+		t.Fatalf("refused seed changed late metadata: data=%q err=%v", got, err)
+	}
+	appearingTargetWorkdir := filepath.Join(root, "appearing-target-workdir")
+	moveBin := filepath.Join(root, "move-bin")
+	if err := os.Mkdir(moveBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	moveScript := "#!/bin/sh\nfor last; do :; done\nif [ \"$last\" = " + shellQuote(root) + " ]; then mkdir -p " + shellQuote(appearingTargetWorkdir) + "; printf 'preserve\\n' > " + shellQuote(filepath.Join(appearingTargetWorkdir, "late-sentinel")) + "; fi\nexec /bin/mv \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(moveBin, "mv"), []byte(moveScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seed = exec.Command("bash", "-c", remoteGitSeed(appearingTargetWorkdir, plan))
+	seedEnv = make([]string, 0, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "PATH=") {
+			seedEnv = append(seedEnv, entry)
+		}
+	}
+	seed.Env = append(seedEnv, "PATH="+moveBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if out, err := seed.CombinedOutput(); err == nil || !strings.Contains(string(out), "workspace appeared during publication") {
+		t.Fatalf("seed did not refuse target appearing during publication: err=%v output=%s", err, out)
+	}
+	if got, err := os.ReadFile(filepath.Join(appearingTargetWorkdir, "late-sentinel")); err != nil || string(got) != "preserve\n" {
+		t.Fatalf("refused seed changed late target: data=%q err=%v", got, err)
+	}
+	if nested, err := filepath.Glob(filepath.Join(appearingTargetWorkdir, ".seed.*")); err != nil || len(nested) != 0 {
+		t.Fatalf("refused seed nested staging under appeared target: paths=%v err=%v", nested, err)
+	}
+	if staging, err := filepath.Glob(filepath.Join(root, ".seed.*")); err != nil || len(staging) != 0 {
+		t.Fatalf("refused seed retained staging: paths=%v err=%v", staging, err)
+	}
+
 	unbornWorkdir := filepath.Join(root, "unborn-workdir")
 	if err := os.Mkdir(unbornWorkdir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	runGit(t, unbornWorkdir, "init")
 	mustWriteTestFile(t, filepath.Join(unbornWorkdir, "stale-unborn.txt"), "stale\n")
-	runSeed("replace unborn workspace", unbornWorkdir)
-	requireSeeded(unbornWorkdir)
-	if _, err := os.Stat(filepath.Join(unbornWorkdir, "stale-unborn.txt")); !os.IsNotExist(err) {
-		t.Fatalf("unborn workspace was reused instead of reseeded: %v", err)
+	mustWriteTestFile(t, filepath.Join(unbornWorkdir, "node_modules", "failed-sentinel.txt"), "preserve\n")
+	failSeed("preserve unborn workspace", unbornWorkdir)
+	if got, err := os.ReadFile(filepath.Join(unbornWorkdir, "stale-unborn.txt")); err != nil || string(got) != "stale\n" {
+		t.Fatalf("unborn workspace changed after refused seed: data=%q err=%v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(unbornWorkdir, "node_modules", "failed-sentinel.txt")); err != nil || string(got) != "preserve\n" {
+		t.Fatalf("failed seed changed raw sentinel: data=%q err=%v", got, err)
 	}
 
 	missingIndexWorkdir := filepath.Join(root, "missing-index-workdir")
@@ -5623,10 +5935,9 @@ func TestRemoteGitSeedLocalCanary(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustWriteTestFile(t, filepath.Join(missingIndexWorkdir, "stale-missing-index.txt"), "stale\n")
-	runSeed("replace missing-index workspace", missingIndexWorkdir)
-	requireSeeded(missingIndexWorkdir)
-	if _, err := os.Stat(filepath.Join(missingIndexWorkdir, "stale-missing-index.txt")); !os.IsNotExist(err) {
-		t.Fatalf("missing-index workspace was reused instead of reseeded: %v", err)
+	failSeed("preserve missing-index workspace", missingIndexWorkdir)
+	if got, err := os.ReadFile(filepath.Join(missingIndexWorkdir, "stale-missing-index.txt")); err != nil || string(got) != "stale\n" {
+		t.Fatalf("missing-index workspace changed after refused seed: data=%q err=%v", got, err)
 	}
 
 	nestedWorkdir := filepath.Join(source, "nested-workdir")

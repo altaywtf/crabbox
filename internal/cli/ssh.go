@@ -2029,6 +2029,8 @@ func remoteGitSeed(workdir string, plan gitCoherencePlan) string {
 		return "true"
 	}
 	parent := filepath.ToSlash(filepath.Dir(workdir))
+	// Callers hold the canonical workspace owner or a certified exclusive one-shot lease.
+	// Stage outside the workspace so a failed publish leaves no persistent seed gate.
 	seed := `origin_git clone --quiet --filter=blob:none --no-checkout --single-branch --branch ` + shellQuote(plan.Branch) + ` "$expected_origin" "$tmp"`
 	prepare, seedManifest := "", ""
 	checkoutGit := "git"
@@ -2064,10 +2066,14 @@ if [ -d "$workdir" ]; then
   fi
 fi
 mkdir -p ` + shellQuote(parent) + `
-tmp="$(mktemp -d ` + shellQuote(parent+"/.seed.XXXXXX") + `)"
-transport_error="$tmp.transport-error"
-cleanup_seed() { rm -rf -- "$tmp"; rm -f -- "$transport_error"; }
+seed_root="$(mktemp -d ` + shellQuote(parent+"/.seed.XXXXXX") + `)"
+tmp="$seed_root/candidate"
+transport_error="$seed_root/transport-error"
+cleanup_seed() {
+  rm -rf -- "$seed_root"
+}
 trap cleanup_seed EXIT
+umask 077
 ` + prepare + `
 printf 'crabbox-git-seed phase=clone\n'
 if ! { ` + seed + `; } >/dev/null 2>"$transport_error"; then
@@ -2087,11 +2093,56 @@ printf 'crabbox-git-seed phase=origin\n'
 repair_origin
 ` + seedManifest + `
 printf 'crabbox-git-seed phase=publish\n'
-cd /
-rm -rf -- "$workdir"
-mv -- "$tmp" "$workdir"
 rm -f -- "$transport_error"
-trap - EXIT
+published_tmp="$seed_root/$(basename "$workdir")"
+if [ "$tmp" != "$published_tmp" ]; then
+  mv "$tmp" "$published_tmp"
+  tmp="$published_tmp"
+fi
+workspace_mode=metadata
+if [ ! -e "$workdir" ]; then
+  workspace_mode=checkout
+elif [ ! -d "$workdir" ]; then
+  echo 'crabbox-git-seed phase=publish: workspace is not a directory' >&2
+  exit 67
+elif [ -z "$(find "$workdir" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+  workspace_mode=checkout
+fi
+mkdir -p -- "$workdir"
+if [ -e "$workdir/.git" ] || [ -L "$workdir/.git" ]; then
+  echo 'crabbox-git-seed phase=publish: workspace has unexpected Git metadata' >&2
+  exit 67
+fi
+if [ "$workspace_mode" = checkout ]; then
+  rmdir -- "$workdir"
+  mv -n "$tmp" ` + shellQuote(parent) + `
+  if [ -e "$tmp" ] || [ -L "$tmp" ]; then
+    echo 'crabbox-git-seed phase=publish: workspace appeared during publication' >&2
+    exit 67
+  fi
+else
+  # Keep the raw workspace authoritative for runtime files. Only Crabbox's
+  # committed sync bookkeeping moves with metadata when the selector changes.
+  # A candidate manifest describes its checkout, never the raw workspace.
+  mkdir -p -- "$tmp/.git/crabbox"
+  : > "$tmp/.git/crabbox/sync-manifest"
+  for name in sync-manifest sync-fingerprint git-hydrate-base; do
+    legacy="$workdir/.crabbox/$name"
+    destination="$tmp/.git/crabbox/$name"
+    if [ -f "$legacy" ] && [ ! -L "$legacy" ]; then
+      mkdir -p -- "$tmp/.git/crabbox"
+      cp -- "$legacy" "$destination"
+    fi
+  done
+  mv -n "$tmp/.git" "$workdir"
+  if [ -e "$tmp/.git" ] || [ -L "$tmp/.git" ]; then
+    echo 'crabbox-git-seed phase=publish: Git metadata appeared during publication' >&2
+    exit 67
+  fi
+fi
+rm -rf -- "$seed_root"
+seed_root=
+tmp=
 `
 	return remoteGitControlShellCommand(script)
 }
