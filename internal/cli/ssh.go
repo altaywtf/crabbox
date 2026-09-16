@@ -2118,13 +2118,18 @@ if [ -e "$workdir/.git" ] || [ -L "$workdir/.git" ]; then
   echo 'crabbox-git-seed phase=publish: workspace has unexpected Git metadata' >&2
   exit 67
 fi
+# GNU mv 9.2-9.4 can fail on a skipped target. Inspect the source before
+# returning the native status so both publication paths report collisions.
 if [ "$workspace_mode" = checkout ]; then
   rmdir -- "$workdir"
-  mv -n "$tmp" "$parent"
+  publish_status=0
+  mv -n "$tmp" "$parent" || publish_status=$?
+  if [ "$publish_status" -ne 0 ] && [ ! -e "$workdir" ] && [ ! -L "$workdir" ]; then exit "$publish_status"; fi
   if [ -e "$tmp" ] || [ -L "$tmp" ]; then
     echo 'crabbox-git-seed phase=publish: workspace appeared during publication' >&2
     exit 67
   fi
+  [ "$publish_status" -eq 0 ] || exit "$publish_status"
 else
   # Keep the raw workspace authoritative for runtime files. Only Crabbox's
   # committed sync bookkeeping moves with metadata when the selector changes.
@@ -2150,11 +2155,14 @@ else
   # Compare the verified candidate index with the raw workspace before publication.
   # This immutable membership survives reuse, independently of each sync selector.
 ` + remoteCaptureInitialOriginAbsences() + `
-  mv -n "$tmp/.git" "$workdir"
+  publish_status=0
+  mv -n "$tmp/.git" "$workdir" || publish_status=$?
+  if [ "$publish_status" -ne 0 ] && [ ! -e "$workdir/.git" ] && [ ! -L "$workdir/.git" ]; then exit "$publish_status"; fi
   if [ -e "$tmp/.git" ] || [ -L "$tmp/.git" ]; then
     echo 'crabbox-git-seed phase=publish: Git metadata appeared during publication' >&2
     exit 67
   fi
+  [ "$publish_status" -eq 0 ] || exit "$publish_status"
   printf 'crabbox-git-seed raw-workspace\n'
 fi
 rm -rf -- "$seed_root"

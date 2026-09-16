@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Preserve existing remote workspaces when origin Git metadata is seeded after a raw sync, including excluded initial absences, retry-safe managed deletion ownership, and native Windows metadata publication. [PR 2284](https://github.com/openclaw/crabbox/pull/2284).
+- Preserve existing remote workspaces when origin Git metadata is seeded after a raw sync, including excluded initial absences, retry-safe managed deletion ownership, and native Windows metadata publication. Keep ownership-supervised sync commands within the existing SSH transport budget. [PR 2284](https://github.com/openclaw/crabbox/pull/2284).
 
 - Preserve ownership of previously synced files when attaching local Git metadata to a raw workspace, so later syncs can remove obsolete files without importing stale readiness markers. Keep local Git pruning on the safe manifest path, rejecting directory symlinks before deleting files outside the workspace. [PR 2285](https://github.com/openclaw/crabbox/pull/2285).
 

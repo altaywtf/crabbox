@@ -5934,34 +5934,66 @@ func TestRemoteGitSeedLocalCanary(t *testing.T) {
 	if got, err := os.ReadFile(filepath.Join(appearingMetadataWorkdir, ".git", "late-sentinel")); err != nil || string(got) != "preserve\n" {
 		t.Fatalf("refused seed changed late metadata: data=%q err=%v", got, err)
 	}
-	appearingTargetWorkdir := filepath.Join(root, "appearing-target-workdir")
-	moveBin := filepath.Join(root, "move-bin")
-	if err := os.Mkdir(moveBin, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	moveScript := "#!/bin/sh\nfor last; do :; done\nif [ \"$last\" = " + shellQuote(root) + " ]; then mkdir -p " + shellQuote(appearingTargetWorkdir) + "; printf 'preserve\\n' > " + shellQuote(filepath.Join(appearingTargetWorkdir, "late-sentinel")) + "; fi\nexec /bin/mv \"$@\"\n"
-	if err := os.WriteFile(filepath.Join(moveBin, "mv"), []byte(moveScript), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	seed = exec.Command("bash", "-c", remoteGitSeed(appearingTargetWorkdir, plan))
-	seedEnv = make([]string, 0, len(os.Environ()))
-	for _, entry := range os.Environ() {
-		if !strings.HasPrefix(entry, "PATH=") {
-			seedEnv = append(seedEnv, entry)
+
+	for _, metadata := range []bool{false, true} {
+		for _, moveCase := range []struct {
+			name    string
+			status  int
+			collide bool
+		}{{"skip-success", 0, true}, {"skip-failure", 1, true}, {"native-failure", 73, false}} {
+			t.Run(fmt.Sprintf("publication-metadata-%v-%s", metadata, moveCase.name), func(t *testing.T) {
+				physicalRoot, err := filepath.EvalSymlinks(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				appearingTargetWorkdir := filepath.Join(physicalRoot, "appearing-target")
+				moveTarget := filepath.Dir(appearingTargetWorkdir)
+				collisionPath := appearingTargetWorkdir
+				wantError := "workspace appeared during publication"
+				if metadata {
+					mustWriteTestFile(t, filepath.Join(appearingTargetWorkdir, "preserve.txt"), "workspace\n")
+					moveTarget = appearingTargetWorkdir
+					collisionPath = filepath.Join(appearingTargetWorkdir, ".git")
+					wantError = "Git metadata appeared during publication"
+				}
+				moveBin := t.TempDir()
+				// mv -n has reported both success and failure when it skips a target.
+				// A native failure without a collision must keep its own exit status.
+				injectedMove := "exit " + strconv.Itoa(moveCase.status)
+				if moveCase.collide {
+					injectedMove = "mkdir -p " + shellQuote(collisionPath) + "; printf 'preserve\\n' > " + shellQuote(filepath.Join(collisionPath, "late-sentinel")) + "; /bin/mv \"$@\"; " + injectedMove
+				}
+				moveScript := "#!/bin/sh\nfor last; do :; done\nif [ \"$last\" = " + shellQuote(moveTarget) + " ]; then " + injectedMove + "; fi\nexec /bin/mv \"$@\"\n"
+				if err := os.WriteFile(filepath.Join(moveBin, "mv"), []byte(moveScript), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				seed := exec.Command("bash", "-c", remoteGitSeed(appearingTargetWorkdir, plan))
+				seed.Env = append(os.Environ(), "PATH="+moveBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+				out, err := seed.CombinedOutput()
+				if moveCase.collide {
+					if exitCode(err) != 67 || !strings.Contains(string(out), wantError) {
+						t.Fatalf("seed did not refuse publication collision: err=%v output=%s", err, out)
+					}
+					requireOriginFile(t, filepath.Join(collisionPath, "late-sentinel"), "preserve\n")
+				} else {
+					if exitCode(err) != moveCase.status || strings.Contains(string(out), "appeared during publication") {
+						t.Fatalf("seed hid native move failure: err=%v output=%s", err, out)
+					}
+					if _, err := os.Lstat(collisionPath); !os.IsNotExist(err) {
+						t.Fatalf("failed move published a destination: %v", err)
+					}
+				}
+				if metadata {
+					requireOriginFile(t, filepath.Join(appearingTargetWorkdir, "preserve.txt"), "workspace\n")
+				}
+				if nested, err := filepath.Glob(filepath.Join(appearingTargetWorkdir, ".seed.*")); err != nil || len(nested) != 0 {
+					t.Fatalf("refused seed nested staging under appeared target: paths=%v err=%v", nested, err)
+				}
+				if staging, err := filepath.Glob(filepath.Join(filepath.Dir(appearingTargetWorkdir), ".seed.*")); err != nil || len(staging) != 0 {
+					t.Fatalf("refused seed retained staging: paths=%v err=%v", staging, err)
+				}
+			})
 		}
-	}
-	seed.Env = append(seedEnv, "PATH="+moveBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	if out, err := seed.CombinedOutput(); err == nil || !strings.Contains(string(out), "workspace appeared during publication") {
-		t.Fatalf("seed did not refuse target appearing during publication: err=%v output=%s", err, out)
-	}
-	if got, err := os.ReadFile(filepath.Join(appearingTargetWorkdir, "late-sentinel")); err != nil || string(got) != "preserve\n" {
-		t.Fatalf("refused seed changed late target: data=%q err=%v", got, err)
-	}
-	if nested, err := filepath.Glob(filepath.Join(appearingTargetWorkdir, ".seed.*")); err != nil || len(nested) != 0 {
-		t.Fatalf("refused seed nested staging under appeared target: paths=%v err=%v", nested, err)
-	}
-	if staging, err := filepath.Glob(filepath.Join(root, ".seed.*")); err != nil || len(staging) != 0 {
-		t.Fatalf("refused seed retained staging: paths=%v err=%v", staging, err)
 	}
 
 	unbornWorkdir := filepath.Join(root, "unborn-workdir")
