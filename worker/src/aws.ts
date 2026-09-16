@@ -1,6 +1,10 @@
 import { XMLParser, XMLValidator } from "fast-xml-parser";
 
 import {
+  lookupAWSLegacyAllocation,
+  type AWSLegacyAllocationEvidence,
+} from "./aws-cleanup-recovery";
+import {
   FixedAWSFetchClient,
   RefreshingAWSFetchClient,
   resolvedAWSCredentials,
@@ -49,6 +53,7 @@ import type {
   ProviderImage,
   ProviderCheckpointOwnership,
   LeaseImageIdentity,
+  LeaseRecord,
   ProviderMachine,
   ProviderAccessTimingObserver,
   ProvisioningAttempt,
@@ -831,6 +836,21 @@ export class EC2SpotClient {
       this.stsClient = new RefreshingAWSFetchClient(credentials, "sts", this.region, requestSignal);
       this.ssmClient = new RefreshingAWSFetchClient(credentials, "ssm", this.region, requestSignal);
     }
+  }
+
+  async legacyAllocationEvidence(
+    lease: LeaseRecord,
+    account: string,
+  ): Promise<AWSLegacyAllocationEvidence> {
+    if (!this.credentialSnapshot || this.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT) {
+      throw new AWSLeaseAuthorityError(
+        "AWS scope recovery requires a fixed direct-provider credential snapshot",
+      );
+    }
+    const cloudtrail = new FixedAWSFetchClient(this.credentialSnapshot, "cloudtrail", this.region);
+    return lookupAWSLegacyAllocation(lease, account, (input, init) =>
+      cloudtrail.fetch(input, init),
+    );
   }
 
   async withLeaseOperation<T>(operation: (session: AWSLeaseOperation) => Promise<T>): Promise<T> {
@@ -2109,9 +2129,6 @@ export class EC2SpotClient {
     snapshotIDs: string[],
     availabilityZones: string[],
   ): Promise<ProviderFastSnapshotRestore[]> {
-    if (this.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT) {
-      throw new Error("AWS qualification fast snapshot restore is disabled");
-    }
     const snapshots = uniqueStrings(snapshotIDs);
     const zones = uniqueStrings(availabilityZones);
     if (snapshots.length === 0 || zones.length === 0) {
@@ -3461,7 +3478,12 @@ export function awsLeaseImageIdentity(
     };
   }
   if (config.selectedImage?.id === imageID) {
-    return { ...config.selectedImage, region };
+    const { revision, ...selected } = config.selectedImage;
+    return {
+      ...selected,
+      region,
+      ...(selected.region === region && revision ? { revision } : {}),
+    };
   }
   if (Object.values(config.awsPromotedAMIs).includes(imageID)) {
     return { id: imageID, source: "promoted", provider: "aws", kind: "aws-ami", region };

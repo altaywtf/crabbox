@@ -1,5 +1,6 @@
 import ssh2, { type Client as SSHClient, type ClientChannel } from "ssh2";
 
+import { AsyncMutex, KeyedAsyncMutex } from "./async-mutex";
 import { AzureResumableProvisioning } from "./azure-provisioning";
 import {
   clearHostReservations,
@@ -24,6 +25,7 @@ import {
   validateProvisioningRecord,
   type LeaseProvisioningOperation,
 } from "./lease-provisioning";
+import { isRegisteredLease, leaseIsLive } from "./lease-state";
 import type { ProviderResumableProvisioning } from "./provider-provisioning";
 import { ProvisioningAttemptHistory } from "./provisioning-attempts";
 import {
@@ -31,6 +33,7 @@ import {
   provisioningMaterialKey,
   sealProvisioningMaterial,
 } from "./provisioning-material";
+import { coordinatorStorageEntries } from "./storage-scan";
 
 const { Client: SSHClientConstructor, utils: sshUtils } = ssh2;
 
@@ -42,7 +45,6 @@ import {
   githubUserIsAdmin,
   isAdminRequest,
   requestWithAuthContext,
-  sha256Hex,
   verifiedPortalTokenExpiresAtForRevocation,
   verifiedUserTokenExpiresAtForRevocation,
   type AuthContext,
@@ -70,6 +72,14 @@ import {
   type AWSIngressConfig,
   type AWSPrivateWorkspaceConfig,
 } from "./aws";
+import {
+  awsCleanupAuditMatchesLease,
+  awsCleanupAuditView,
+  awsCleanupRecoveryAuditKey,
+  awsCleanupRecoveryFingerprint,
+  requireAWSLegacyCleanupLease,
+  type AWSLegacyCleanupAudit,
+} from "./aws-cleanup-recovery";
 import { InvalidAWSRegionError, sanitizeAWSRegion } from "./aws-region";
 import {
   AzureClient,
@@ -170,6 +180,7 @@ import {
   isDaytonaNotFound,
   type DaytonaSSHEndpoint,
 } from "./daytona";
+import { base64ToBytes, bytesToBase64, bytesToHex, sha256Hex } from "./encoding";
 import {
   GCPClient,
   gcpMachineImageNotFound,
@@ -1126,8 +1137,9 @@ export class FleetCoordinator {
   private readonly egressSessionStateHydrations = new Map<string, Promise<void>>();
   private readonly runtimeAdapterAgents = new Map<string, WebSocket>();
   private readonly runtimeAdapterPending = new Map<string, RuntimeAdapterPendingRequest>();
-  private readonly runtimeAdapterDeleteQueues = new Map<string, Promise<void>>();
-  private readonly daytonaSnapshotBootstrapQueues = new Map<string, Promise<void>>();
+  private readonly runtimeAdapterDeleteLocks = new KeyedAsyncMutex<string>();
+  // Same-name bootstraps must not observe another request's active snapshot.
+  private readonly daytonaSnapshotBootstrapLocks = new KeyedAsyncMutex<string>();
   private readonly controlSockets = new Map<string, WebSocket>();
   private readonly failedControlSockets = new WeakSet<WebSocket>();
   private readonly workspaceTerminals = new Map<string, Set<WebSocket>>();
@@ -1138,11 +1150,11 @@ export class FleetCoordinator {
   private readonly deviceMembershipCache = new Map<string, DeviceMembershipCacheEntry>();
   private currentAdminGrantVersion: string | undefined;
   private bridgeRestoreReady: Promise<boolean> | undefined;
-  private readyPoolBorrowQueue: Promise<void> = Promise.resolve();
-  private bridgeTicketQueue: Promise<void> = Promise.resolve();
+  private readonly readyPoolBorrowLock = new AsyncMutex();
+  private readonly bridgeTicketLock = new AsyncMutex();
   private readonly bridgeTickets: BridgeTickets;
-  private awsIngressBarrier: Promise<void> = Promise.resolve();
-  private providerMaintenanceQueue: Promise<void> = Promise.resolve();
+  private readonly awsIngressOperationLock = new AsyncMutex();
+  private readonly providerMaintenanceLock = new AsyncMutex();
   private readonly webVNCCredentialHandoffs: WebVNCCredentialHandoffs;
   private readonly leaseProvisioning: LeaseProvisioningController;
   private maintenanceRun: Promise<void> | undefined;
@@ -1194,7 +1206,7 @@ export class FleetCoordinator {
     );
     state.provisioning?.registerProvisioningTick(() => this.leaseProvisioning.tick());
     this.bridgeTickets = new BridgeTickets(state.storage, {
-      withLock: (operation) => this.withBridgeTicketLock(operation),
+      withLock: (operation) => this.bridgeTicketLock.run(operation),
       getLease: (id) => this.getLease(id),
       identifierMatchesLease,
       currentTicket: (ticket, lease) => this.currentLeaseBridgeTicket(ticket, lease),
@@ -2490,17 +2502,7 @@ export class FleetCoordinator {
           owner: attachment.owner,
           ...(attachment.org ? { org: attachment.org } : {}),
           ...(attachment.admin !== undefined ? { admin: attachment.admin } : {}),
-          ...(attachment.auth ? { auth: attachment.auth } : {}),
-          ...(attachment.login ? { login: attachment.login } : {}),
-          ...(attachment.sharedTokenHash ? { sharedTokenHash: attachment.sharedTokenHash } : {}),
-          ...(attachment.adminTokenHash ? { adminTokenHash: attachment.adminTokenHash } : {}),
-          ...(attachment.adminGrantVersion
-            ? { adminGrantVersion: attachment.adminGrantVersion }
-            : {}),
-          ...(attachment.portalSessionHash
-            ? { portalSessionHash: attachment.portalSessionHash }
-            : {}),
-          ...(attachment.githubGrant ? { githubGrant: attachment.githubGrant } : {}),
+          ...copyBridgeGrant(attachment),
           ...(attachment.viewerSessionID ? { viewerSessionID: attachment.viewerSessionID } : {}),
           ...(attachment.viewerSessionExpiresAt
             ? { viewerSessionExpiresAt: attachment.viewerSessionExpiresAt }
@@ -3206,7 +3208,7 @@ export class FleetCoordinator {
     await this.webVNCCredentialHandoffs.cleanupExpired();
     await this.cleanupExpiredWebVNCPortalViewerAuth();
     await this.reconcileRuntimeAdapterDeletes(leaseIDs);
-    await this.withReadyPoolBorrowLock(() =>
+    await this.readyPoolBorrowLock.run(() =>
       this.state.runExclusive(() => this.maintainReadyPools(Date.now())),
     );
     await this.maintainWorkspacePrewarm();
@@ -4529,7 +4531,7 @@ export class FleetCoordinator {
       // Queued regional attempts must not restore access from their pre-provisioning snapshot.
       withLeaseAccess: (target, operation, observe) => {
         const ingressQueuedAt = Date.now();
-        return this.withAWSIngressOperationLock(async () => {
+        return this.awsIngressOperationLock.run(async () => {
           observe?.("ingress_wait", Date.now() - ingressQueuedAt);
           const lifecycleQueuedAt = Date.now();
           const access = await this.state.runExclusive(async () => {
@@ -5056,9 +5058,18 @@ export class FleetCoordinator {
       (attempt &&
         attempt.checkpointID === checkpointID &&
         createAttemptMatchesLease(attempt, existing));
-    if (!sameOwner || !sameIntent || !sameAttempt || !leaseIsLive(existing)) {
+    if (!sameOwner || !sameIntent || !sameAttempt) {
       return json(
         { error: "lease_id_conflict", message: "lease id is bound to another create intent" },
+        { status: 409 },
+      );
+    }
+    if (!leaseIsLive(existing)) {
+      return json(
+        {
+          error: "fixed_lease_terminal",
+          message: "lease id is bound to a terminal result for this create intent",
+        },
         { status: 409 },
       );
     }
@@ -7194,7 +7205,69 @@ export class FleetCoordinator {
       lease.createAttemptID,
       lease.createAttemptGeneration,
       lease.lifecycle,
+      lease.slug,
+      lease.providerOwner,
+      lease.providerKey,
+      lease.providerKeyCleanupOwned,
+      lease.hostId,
+      lease.hostID,
     ]);
+  }
+
+  private async commitRecoveredLeaseScope<T>(
+    request: Request,
+    leaseID: string,
+    expectedBinding: string,
+    observation: { providerScope: string; resourceAbsent: true },
+    prepareAudit: (transaction: CoordinatorStorageView) => Promise<() => Promise<T>>,
+  ): Promise<T> {
+    const runtime = this.state.provisioning;
+    if (!runtime)
+      throw new ProviderResourceUnresolvedError("Atomic cleanup recovery is unavailable");
+    return this.state.runExclusive(() =>
+      runtime.commitAndWake(async (transaction) => {
+        const current = await transaction.get<LeaseRecord>(leaseKey(leaseID));
+        if (
+          !isAdminRequest(request) ||
+          requestAuthType(request) === "device" ||
+          !current ||
+          this.cleanupRecoveryLeaseBinding(current) !== expectedBinding ||
+          !this.cleanupRecoveryLeaseEligible(current) ||
+          current.providerScope != null ||
+          current.provisioningRequestStartedAt ||
+          current.cleanupCompletedAt ||
+          !current.cleanupError ||
+          current.state !== "released" ||
+          current.releaseDeletesServer !== true ||
+          (await provisioningOwnsLease(transaction, leaseID))
+        ) {
+          throw new ProviderResourceUnresolvedError(
+            "Cleanup recovery lease or administrator authority changed before commit",
+          );
+        }
+        const writeAudit = await prepareAudit(transaction);
+        // Audit preparation can await storage; recheck authority before its first write.
+        const admittedGrantVersion = trustedAdminGrantVersion(request);
+        if (!admittedGrantVersion || admittedGrantVersion !== this.currentAdminGrantVersion) {
+          throw new ProviderResourceUnresolvedError(
+            "Cleanup recovery lease or administrator authority changed before commit",
+          );
+        }
+        const audit = await writeAudit();
+        const now = Date.now();
+        await transaction.put(leaseKey(leaseID), {
+          ...current,
+          providerScope: observation.providerScope,
+          provisioningResourceMayExist: false,
+          cleanupRetryAt: new Date(now).toISOString(),
+          updatedAt: new Date(now).toISOString(),
+        });
+        // This records the next cleanup wake, not provider cleanup completion.
+        const previousWake = await transaction.get<number | null>(legacyAlarmKey);
+        await setLegacyWake(transaction, Math.min(previousWake ?? now, now));
+        return audit;
+      }),
+    );
   }
 
   private async leaseRoute(request: Request, leaseID: string, action?: string): Promise<Response> {
@@ -7234,10 +7307,29 @@ export class FleetCoordinator {
           : undefined;
       if (!provider?.recoverCleanup)
         return json({ error: "cleanup_recovery_unsupported" }, { status: 501 });
-      if (!this.cleanupRecoveryLeaseEligible(lease)) {
+      if (provider.supportsCleanupScopeRecovery && !admin) {
+        return json(
+          { error: "forbidden", message: "administrator cleanup recovery required" },
+          { status: 403 },
+        );
+      }
+      if (
+        !this.cleanupRecoveryLeaseEligible(lease) ||
+        (await provisioningOwnsLease(this.state.storage, lease.id))
+      ) {
         return json({ error: "cleanup_recovery_requires_expired_blocked_lease" }, { status: 409 });
       }
       const expectedBinding = this.cleanupRecoveryLeaseBinding(lease);
+      const commitScopeRecovery: ProviderScopeRecoveryCommit = (observation, prepareAudit) =>
+        this.commitRecoveredLeaseScope(
+          request,
+          lease.id,
+          expectedBinding,
+          observation,
+          prepareAudit,
+        );
+      const scopeRecoveryArgs: [] | [ProviderScopeRecoveryCommit] =
+        provider.supportsCleanupScopeRecovery ? [commitScopeRecovery] : [];
       try {
         const recovery = await provider.recoverCleanup(
           lease,
@@ -7257,6 +7349,7 @@ export class FleetCoordinator {
               }
               return await commit();
             }),
+          ...scopeRecoveryArgs,
         );
         return json({ leaseID: lease.id, provider: providerID, recovery });
       } catch (error) {
@@ -7289,6 +7382,12 @@ export class FleetCoordinator {
           : undefined;
       if (!provider?.inspectCleanup) {
         return json({ error: "cleanup_inspection_unsupported" }, { status: 501 });
+      }
+      if (provider.supportsCleanupScopeRecovery && !admin) {
+        return json(
+          { error: "forbidden", message: "administrator cleanup inspection required" },
+          { status: 403 },
+        );
       }
       return json({
         leaseID: lease.id,
@@ -7740,7 +7839,7 @@ export class FleetCoordinator {
     };
     const lease =
       managedProvider === "aws" && !committed.network?.awsPrivate
-        ? await this.withAWSIngressOperationLock(refresh)
+        ? await this.awsIngressOperationLock.run(refresh)
         : await refresh();
     return json({ lease: this.leaseForRequest(lease, request, isAdminRequest(request)) });
   }
@@ -8114,7 +8213,7 @@ export class FleetCoordinator {
         { status: 403 },
       );
     }
-    return await this.serializeRuntimeAdapterDelete(lease.id, async () => {
+    return await this.runtimeAdapterDeleteLocks.run(lease.id, async () => {
       const result = await this.finalizeRuntimeAdapterDeleteCompletion(
         lease,
         completion,
@@ -8175,7 +8274,7 @@ export class FleetCoordinator {
         { status: 403 },
       );
     }
-    return await this.serializeRuntimeAdapterDelete(lease.id, async () => {
+    return await this.runtimeAdapterDeleteLocks.run(lease.id, async () => {
       const result = await this.finalizeLegacyRuntimeAdapterDelete(
         lease,
         completion,
@@ -8250,7 +8349,7 @@ export class FleetCoordinator {
     lease: LeaseRecord,
     previousShare: NormalizedLeaseShare,
   ): Promise<void> {
-    await this.withBridgeTicketLock(async () => {
+    await this.bridgeTicketLock.run(async () => {
       await this.putLease(lease);
       if (leaseShareAccessShrank(previousShare, normalizedLeaseShare(lease.share))) {
         await this.revokeUnauthorizedLeaseBridges(lease);
@@ -9200,7 +9299,7 @@ export class FleetCoordinator {
         409,
       );
     }
-    return await this.serializeRuntimeAdapterDelete(lease.id, async () => {
+    return await this.runtimeAdapterDeleteLocks.run(lease.id, async () => {
       const current = await this.state.runExclusive(() => this.getLease(lease.id));
       if (!current || !leaseIsLive(current)) {
         return runtimeAdapterWorkspaceDeleteError(
@@ -9363,28 +9462,6 @@ export class FleetCoordinator {
         { status: 202 },
       );
     });
-  }
-
-  private async serializeRuntimeAdapterDelete<T>(
-    leaseID: string,
-    operation: () => Promise<T>,
-  ): Promise<T> {
-    const previous = this.runtimeAdapterDeleteQueues.get(leaseID) ?? Promise.resolve();
-    let release!: () => void;
-    const turn = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const tail = previous.then(() => turn);
-    this.runtimeAdapterDeleteQueues.set(leaseID, tail);
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-      if (this.runtimeAdapterDeleteQueues.get(leaseID) === tail) {
-        this.runtimeAdapterDeleteQueues.delete(leaseID);
-      }
-    }
   }
 
   private async markRuntimeAdapterDeletePending(
@@ -9990,7 +10067,7 @@ export class FleetCoordinator {
   }
 
   private async reconcileRuntimeAdapterDelete(lease: LeaseRecord): Promise<void> {
-    await this.serializeRuntimeAdapterDelete(lease.id, async () => {
+    await this.runtimeAdapterDeleteLocks.run(lease.id, async () => {
       const requestedAt = lease.runtimeAdapterDeleteRequestedAt;
       const adapterID = lease.runtimeAdapterID;
       const workspaceID = lease.runtimeAdapterWorkspaceID;
@@ -10835,7 +10912,7 @@ export class FleetCoordinator {
     if (!validWebVNCPortalViewerTicket(value)) {
       return undefined;
     }
-    return await this.withBridgeTicketLock(async () => {
+    return await this.bridgeTicketLock.run(async () => {
       const key = webVNCPortalViewerTicketKey(value);
       const ticket = await this.state.storage.get<WebVNCPortalViewerTicketRecord>(key);
       if (!ticket || ticket.ticket !== value) {
@@ -10960,7 +11037,7 @@ export class FleetCoordinator {
   private async consumeWebVNCPortalViewerCredentials(
     session: WebVNCPortalViewerSessionRecord,
   ): Promise<WebVNCCredentialHandoffResult> {
-    return await this.withBridgeTicketLock(async () => {
+    return await this.bridgeTicketLock.run(async () => {
       const key = webVNCPortalViewerSessionKey(session.session);
       const current = await this.state.storage.get<WebVNCPortalViewerSessionRecord>(key);
       const handoff = current?.credentialHandoffTicket;
@@ -11639,7 +11716,7 @@ export class FleetCoordinator {
     if (!validCodeViewerTicket(value)) {
       return undefined;
     }
-    return await this.withBridgeTicketLock(async () => {
+    return await this.bridgeTicketLock.run(async () => {
       const key = codeViewerTicketKey(value);
       const ticket = await this.state.storage.get<CodeViewerTicketRecord>(key);
       if (
@@ -11744,7 +11821,7 @@ export class FleetCoordinator {
         const expiresAt = Number.isFinite(tokenExpiresAt)
           ? Math.min(revocationExpiresAt, tokenExpiresAt)
           : revocationExpiresAt;
-        await this.withBridgeTicketLock(async () => {
+        await this.bridgeTicketLock.run(async () => {
           await this.state.storage.put<CodeViewerSessionRevocationRecord>(
             codeViewerSessionRevocationKey(portalSessionHash),
             {
@@ -11838,7 +11915,7 @@ export class FleetCoordinator {
     agent: WebSocket,
     bridgeGrant: CachedBridgeGrant,
   ): Promise<Response> {
-    return await this.withBridgeTicketLock(async () => {
+    return await this.bridgeTicketLock.run(async () => {
       const currentLease = await this.resolvePortalLease(lease.id, request);
       if (!currentLease) {
         return notFound();
@@ -12232,7 +12309,7 @@ export class FleetCoordinator {
         { status: 426 },
       );
     }
-    return await this.withBridgeTicketLock(async () => {
+    return await this.bridgeTicketLock.run(async () => {
       const lease = await this.resolvePortalLease(identifier, request);
       if (!lease) {
         return notFound();
@@ -12467,7 +12544,7 @@ export class FleetCoordinator {
     if (!validRuntimeAdapterTicket(value)) {
       return { status: "invalid" };
     }
-    return this.withBridgeTicketLock(async () => {
+    return this.bridgeTicketLock.run(async () => {
       const key = runtimeAdapterTicketKey(value);
       const ticket = await this.state.storage.get<RuntimeAdapterTicketRecord>(key);
       if (!ticket || ticket.ticket !== value || !isCurrentOrgKey(ticket.org)) {
@@ -12719,13 +12796,13 @@ export class FleetCoordinator {
     request: Request,
     typed = false,
   ): Promise<ReadyPoolEntry[]> {
-    return await this.withReadyPoolBorrowLock(() =>
+    return await this.readyPoolBorrowLock.run(() =>
       this.state.runExclusive(() => this.readyPoolStatusSnapshot(request, key, typed)),
     );
   }
 
   private async allReadyPoolStatus(request: Request): Promise<ReadyPoolEntry[]> {
-    return await this.withReadyPoolBorrowLock(() =>
+    return await this.readyPoolBorrowLock.run(() =>
       this.state.runExclusive(() => this.readyPoolStatusSnapshot(request)),
     );
   }
@@ -12873,7 +12950,7 @@ export class FleetCoordinator {
         { status: 409 },
       );
     }
-    return await this.withReadyPoolBorrowLock(() =>
+    return await this.readyPoolBorrowLock.run(() =>
       this.state.runExclusive(async () => {
         const lease = await this.getLease(leaseID);
         if (!lease) return notFound();
@@ -13032,7 +13109,7 @@ export class FleetCoordinator {
     } else {
       delete input.compatibilityKey;
     }
-    return await this.withReadyPoolBorrowLock(async () => {
+    return await this.readyPoolBorrowLock.run(async () => {
       return await this.state.runExclusive(async () => {
         await this.incrementReadyPoolCounters(request, key, { borrowRequests: 1 }, typed);
         const entries = (await this.readyPoolStatusSnapshot(request, key, typed)).filter((entry) =>
@@ -13135,7 +13212,7 @@ export class FleetCoordinator {
     if (!borrowToken) {
       return json({ error: "borrow_token_required" }, { status: 400 });
     }
-    return await this.withReadyPoolBorrowLock(() =>
+    return await this.readyPoolBorrowLock.run(() =>
       this.state.runExclusive(async () => {
         const current = await this.getReadyPoolEntry(key, leaseID, typed);
         const lease = await this.getLease(leaseID);
@@ -13250,7 +13327,7 @@ export class FleetCoordinator {
       ...(compatibilityKey ? { compatibilityKey } : {}),
     });
     const nowMs = Date.now();
-    return await this.withReadyPoolBorrowLock(() =>
+    return await this.readyPoolBorrowLock.run(() =>
       this.state.runExclusive(async () => {
         await this.maintainReadyPools(nowMs);
         const owner = requestOwner(request);
@@ -13403,7 +13480,7 @@ export class FleetCoordinator {
     if (!token) {
       return json({ error: "fill_claim_token_required" }, { status: 400 });
     }
-    return await this.withReadyPoolBorrowLock(() =>
+    return await this.readyPoolBorrowLock.run(() =>
       this.state.runExclusive(async () => {
         const claim = await this.state.storage.get<ReadyPoolFillClaim>(
           readyPoolFillClaimKey(token, typed),
@@ -13424,7 +13501,7 @@ export class FleetCoordinator {
   }
 
   private async readyPoolMetrics(request: Request, key: string): Promise<Response> {
-    return await this.withReadyPoolBorrowLock(() =>
+    return await this.readyPoolBorrowLock.run(() =>
       this.state.runExclusive(async () => {
         await this.maintainReadyPools(Date.now());
         const leases = new Map((await this.leaseRecords()).map((lease) => [lease.id, lease]));
@@ -13460,7 +13537,7 @@ export class FleetCoordinator {
     if (!validLeaseID(leaseID)) {
       return json({ error: "invalid_lease_id" }, { status: 400 });
     }
-    return await this.withReadyPoolBorrowLock(async () => {
+    return await this.readyPoolBorrowLock.run(async () => {
       const current = await this.getReadyPoolEntry(key, leaseID, typed);
       if (!current) {
         return notFound();
@@ -14006,7 +14083,7 @@ export class FleetCoordinator {
         { status: 400 },
       );
     }
-    return await this.withDaytonaSnapshotBootstrapLock(name, async () => {
+    return await this.daytonaSnapshotBootstrapLocks.run(name, async () => {
       const result = await new DaytonaClient(this.env).bootstrapSnapshot(
         name,
         cpu,
@@ -17136,7 +17213,7 @@ export class FleetCoordinator {
     }
     for (const target of work) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- one fence protects all shared AWS ingress mutations.
-      await this.withAWSIngressOperationLock(async () => {
+      await this.awsIngressOperationLock.run(async () => {
         const fresh = await this.state.runExclusive(async () => {
           const stored = await this.state.storage.get<StoredAWSIngressReconcileRecord>(
             awsIngressReconcileRecordKey,
@@ -17330,7 +17407,7 @@ export class FleetCoordinator {
     trigger: "alarm" | "admin",
     requestedConfig?: AWSOrphanSweepConfig,
   ): Promise<AWSOrphanSweepRecord | undefined> {
-    return this.withProviderMaintenanceLock(async () => {
+    return this.providerMaintenanceLock.run(async () => {
       const config = requestedConfig ?? this.awsOrphanSweepConfig();
       if (!config.enabled) {
         return undefined;
@@ -17631,7 +17708,7 @@ export class FleetCoordinator {
     trigger: "alarm" | "admin",
     requestedConfig?: AzureOrphanSweepConfig,
   ): Promise<AzureOrphanSweepRecord | undefined> {
-    return this.withProviderMaintenanceLock(async () => {
+    return this.providerMaintenanceLock.run(async () => {
       const config = requestedConfig ?? this.azureOrphanSweepConfig();
       if (!config.enabled) {
         return undefined;
@@ -18112,32 +18189,13 @@ export class FleetCoordinator {
     prefix: string,
     visitor: (record: T, key: string) => Promise<boolean | void> | boolean | void,
   ): Promise<void> {
-    let startAfter: string | undefined;
-    for (;;) {
-      // oxlint-disable-next-line eslint/no-await-in-loop -- each bounded page starts after the previous page.
-      const page = await this.state.storage.list<T>({
-        prefix,
-        limit: storageRecordScanBatchSize,
-        noCache: true,
-        ...(startAfter ? { startAfter } : {}),
-      });
-      if (page.size === 0) {
-        break;
-      }
-      for (const [key, record] of page) {
-        // oxlint-disable-next-line eslint/no-await-in-loop -- sequential visits bound legacy record hydration.
-        const shouldContinue = await visitor(record, key);
-        if (shouldContinue === false) {
-          return;
-        }
-      }
-      const nextStartAfter = [...page.keys()].at(-1);
-      if (!nextStartAfter || nextStartAfter === startAfter) {
-        throw new Error(`${prefix} record scan did not advance`);
-      }
-      startAfter = nextStartAfter;
-      if (page.size < storageRecordScanBatchSize) {
-        break;
+    for await (const [key, record] of coordinatorStorageEntries<T>(this.state.storage, {
+      prefix,
+      limit: storageRecordScanBatchSize,
+      noCache: true,
+    })) {
+      if ((await visitor(record, key)) === false) {
+        return;
       }
     }
   }
@@ -18249,91 +18307,6 @@ export class FleetCoordinator {
 
   private async deleteReadyPoolEntry(entry: ReadyPoolEntry, typed = false): Promise<void> {
     await this.state.storage.delete(readyPoolKey(entry.key, entry.leaseID, typed));
-  }
-
-  private async withReadyPoolBorrowLock<T>(operation: () => Promise<T>): Promise<T> {
-    let release!: () => void;
-    const previous = this.readyPoolBorrowQueue.catch(() => {});
-    const next = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    this.readyPoolBorrowQueue = previous.then(() => next);
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-    }
-  }
-
-  private async withBridgeTicketLock<T>(operation: () => Promise<T>): Promise<T> {
-    let release!: () => void;
-    const previous = this.bridgeTicketQueue.catch(() => {});
-    const next = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    this.bridgeTicketQueue = previous.then(() => next);
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-    }
-  }
-
-  private async withAWSIngressOperationLock<T>(operation: () => Promise<T>): Promise<T> {
-    let release!: () => void;
-    const previous = this.awsIngressBarrier.catch(() => {});
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    this.awsIngressBarrier = previous.then(() => gate);
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-    }
-  }
-
-  private async withProviderMaintenanceLock<T>(operation: () => Promise<T>): Promise<T> {
-    let release!: () => void;
-    const previous = this.providerMaintenanceQueue.catch(() => {});
-    const next = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    this.providerMaintenanceQueue = previous.then(() => next);
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-    }
-  }
-
-  private async withDaytonaSnapshotBootstrapLock<T>(
-    name: string,
-    operation: () => Promise<T>,
-  ): Promise<T> {
-    let release!: () => void;
-    const previous =
-      this.daytonaSnapshotBootstrapQueues.get(name)?.catch(() => {}) ?? Promise.resolve();
-    const next = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const tail = previous.then(() => next);
-    this.daytonaSnapshotBootstrapQueues.set(name, tail);
-    await previous;
-    try {
-      // Daytona exposes async snapshot completion by name, so same-name
-      // bootstraps must not overlap and observe another request's active row.
-      return await operation();
-    } finally {
-      release();
-      if (this.daytonaSnapshotBootstrapQueues.get(name) === tail) {
-        this.daytonaSnapshotBootstrapQueues.delete(name);
-      }
-    }
   }
 
   private async recentRuns(
@@ -19482,7 +19455,7 @@ export class FleetCoordinator {
   private withLeaseCleanupState<T>(lease: LeaseRecord, operation: () => Promise<T>): Promise<T> {
     const commit = () => this.state.runExclusive(operation);
     return managedLeaseProvider(lease) === "aws" && !lease.network?.awsPrivate
-      ? this.withAWSIngressOperationLock(commit)
+      ? this.awsIngressOperationLock.run(commit)
       : commit();
   }
 
@@ -19864,8 +19837,7 @@ async function readyPoolTaggedDigest(
     payload.set(field.encoded, offset);
     offset += field.encoded.byteLength;
   }
-  const digest = await crypto.subtle.digest("SHA-256", payload);
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return sha256Hex(payload);
 }
 
 function validUnicodeScalarString(value: string): boolean {
@@ -20948,7 +20920,12 @@ function azureLeaseImageIdentity(
   region: string,
 ): LeaseImageIdentity | undefined {
   if (config.selectedImage) {
-    return { ...config.selectedImage, region };
+    const { revision, ...selected } = config.selectedImage;
+    return {
+      ...selected,
+      region,
+      ...(selected.region === region && revision ? { revision } : {}),
+    };
   }
   if (config.azureSnapshot) {
     return {
@@ -21249,7 +21226,7 @@ function runtimeAdapterLegacyDeleteCompletion(
 function newLeaseID(): string {
   const bytes = new Uint8Array(6);
   crypto.getRandomValues(bytes);
-  return `cbx_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  return `cbx_${bytesToHex(bytes)}`;
 }
 
 function newCreateAttemptGeneration(): string {
@@ -21423,6 +21400,7 @@ function sameLeaseImageIdentity(left: LeaseImageIdentity, right: LeaseImageIdent
     left.kind === right.kind &&
     left.region === right.region &&
     left.promotedAt === right.promotedAt &&
+    left.revision === right.revision &&
     left.sourceID === right.sourceID
   );
 }
@@ -22751,13 +22729,13 @@ async function workspaceResponseError(response: Response, fallback: string): Pro
 function newRunID(): string {
   const bytes = new Uint8Array(6);
   crypto.getRandomValues(bytes);
-  return `run_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  return `run_${bytesToHex(bytes)}`;
 }
 
 function newWebVNCSessionID(prefix: "agent" | "viewer"): string {
   const bytes = new Uint8Array(8);
   crypto.getRandomValues(bytes);
-  return `${prefix}_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  return `${prefix}_${bytesToHex(bytes)}`;
 }
 
 function newWebVNCPortalViewerTicket(): string {
@@ -22771,7 +22749,7 @@ function newWebVNCPortalViewerSession(): string {
 function newRuntimeAdapterTicket(): string {
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
-  return `adapter_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  return `adapter_${bytesToHex(bytes)}`;
 }
 
 function newNativeVNCTicket(): string {
@@ -22793,13 +22771,13 @@ function newCodeViewerSession(): string {
 function randomHexToken(prefix: string): string {
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
-  return `${prefix}${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  return `${prefix}${bytesToHex(bytes)}`;
 }
 
 function newEgressSessionID(): string {
   const bytes = new Uint8Array(6);
   crypto.getRandomValues(bytes);
-  return `egress_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  return `egress_${bytesToHex(bytes)}`;
 }
 
 function egressSocketKey(leaseID: string, sessionID: string): string {
@@ -24359,13 +24337,7 @@ function leaseBridgeTicketPrincipal(
     owner: ticket.owner,
     org: ticket.org,
     admin: ticket.admin === true,
-    ...(ticket.auth ? { auth: ticket.auth } : {}),
-    ...(ticket.login ? { login: ticket.login } : {}),
-    ...(ticket.sharedTokenHash ? { sharedTokenHash: ticket.sharedTokenHash } : {}),
-    ...(ticket.adminTokenHash ? { adminTokenHash: ticket.adminTokenHash } : {}),
-    ...(ticket.adminGrantVersion ? { adminGrantVersion: ticket.adminGrantVersion } : {}),
-    ...(ticket.portalSessionHash ? { portalSessionHash: ticket.portalSessionHash } : {}),
-    ...(ticket.githubGrant ? { githubGrant: ticket.githubGrant } : {}),
+    ...copyBridgeGrant(ticket),
   };
 }
 
@@ -24411,23 +24383,6 @@ function sendControl(socket: WebSocket, payload: unknown): void {
   } catch {
     closeSocket(socket, 1011, "control send failed");
   }
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary);
-}
-
-function base64ToBytes(value: string): Uint8Array {
-  const binary = atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
 }
 
 function identifierMatchesLease(identifier: string, lease: LeaseRecord): boolean {
@@ -24607,8 +24562,7 @@ async function workspaceSSHHostKeyFingerprint(publicKey: string): Promise<string
     throw new Error("workspace SSH host public key is invalid");
   }
   const raw = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
-  const digest = await crypto.subtle.digest("SHA-256", raw);
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return sha256Hex(raw);
 }
 
 function requestSourceCIDRs(request: Request): string[] {
@@ -25285,10 +25239,6 @@ function pinnedHostConflict(config: LeaseConfig, leases: LeaseRecord[]): Respons
   );
 }
 
-function leaseIsLive(lease: LeaseRecord): boolean {
-  return lease.state === "active" || lease.state === "provisioning";
-}
-
 function leaseHeartbeatStateError(
   lease: LeaseRecord,
   now = Date.now(),
@@ -25301,10 +25251,6 @@ function leaseHeartbeatStateError(
     return "lease_expired";
   }
   return undefined;
-}
-
-function isRegisteredLease(lease: LeaseRecord): boolean {
-  return lease.lifecycle === "registered";
 }
 
 function managedLeaseProvider(lease: LeaseRecord): Provider | undefined {
@@ -26619,12 +26565,15 @@ interface CloudProvider {
   deleteServer(id: string): Promise<void>;
   deleteOwnedServer?(lease: LeaseRecord): Promise<void>;
   inspectCleanup?(lease: LeaseRecord): Promise<unknown>;
+  // Scope repair requires admin authorization and its own lifecycle commit capability.
+  supportsCleanupScopeRecovery?: true;
   // Revalidate the lease after provider reads, before committing any recovery writes.
   recoverCleanup?(
     lease: LeaseRecord,
     expectedClaimFingerprint: string,
     actor: string,
     commitGuard: <T>(commit: () => Promise<T>) => Promise<T>,
+    commitScopeRecovery?: ProviderScopeRecoveryCommit,
   ): Promise<unknown>;
   supportsNativeImages(): boolean;
   nativeImagesUnsupportedMessage(): string;
@@ -26723,6 +26672,12 @@ interface ProviderWorkspaceCapability {
 
 type ProviderStateStorage = CoordinatorStorage;
 type ProviderStateStorageView = CoordinatorStorageView;
+
+// The lifecycle owner accepts a proved scope binding, never an arbitrary lease patch.
+type ProviderScopeRecoveryCommit = <T>(
+  observation: { providerScope: string; resourceAbsent: true },
+  prepareAudit: (transaction: CoordinatorStorageView) => Promise<() => Promise<T>>,
+) => Promise<T>;
 
 interface ProviderAccessContext {
   requestSourceCIDRs: string[];
@@ -27021,6 +26976,7 @@ export class AzureProvider implements CloudProvider {
             kind: promoted.kind ?? "azure-os-disk-snapshot",
             region: promoted.region ?? located.azureLocation,
             promotedAt: promoted.promotedAt,
+            ...(promoted.revision ? { revision: promoted.revision } : {}),
             ...(snapshotID !== promoted.id ? { sourceID: snapshotID } : {}),
           },
         };
@@ -28294,6 +28250,7 @@ async function recordAWSMacHostAllocations(
 
 export class AWSProvider implements CloudProvider {
   readonly recoveryIsAuthoritative = true;
+  readonly supportsCleanupScopeRecovery = true;
 
   private clientValue?: EC2SpotClient;
   private readonly region: string;
@@ -28407,6 +28364,115 @@ export class AWSProvider implements CloudProvider {
 
   findServer(id: string): Promise<ProviderMachine | undefined> {
     return this.client.findServer(id);
+  }
+
+  private async recordedCleanupRecovery(
+    lease: LeaseRecord,
+  ): Promise<AWSLegacyCleanupAudit | undefined> {
+    const audit = await this.storage.get<AWSLegacyCleanupAudit>(
+      awsCleanupRecoveryAuditKey(lease.id),
+    );
+    if (audit && !(await awsCleanupAuditMatchesLease(audit, lease))) {
+      throw new ProviderResourceUnresolvedError(
+        "AWS cleanup recovery audit does not match the retained lease",
+      );
+    }
+    return audit ? awsCleanupAuditView(audit) : undefined;
+  }
+
+  private async observeLegacyCleanupScope(lease: LeaseRecord) {
+    requireAWSLegacyCleanupLease(lease);
+    return this.withLeaseOperation(async (session) => {
+      if (session.region !== lease.region) {
+        throw new ProviderResourceUnresolvedError(
+          "AWS recovery Region does not match the retained lease",
+        );
+      }
+      const identity = await session.verifiedIdentity();
+      const evidence = await session.client.legacyAllocationEvidence(lease, identity.account);
+      if (await session.findServer(lease.cloudID)) {
+        throw new ProviderResourceUnresolvedError(
+          "AWS instance is still visible; use normal owned-resource cleanup instead of scope recovery",
+        );
+      }
+      return evidence;
+    });
+  }
+
+  async inspectCleanup(lease: LeaseRecord): Promise<unknown> {
+    const recoveryAudit = await this.recordedCleanupRecovery(lease);
+    if (recoveryAudit) return { recoveryAudit };
+    const claimFingerprint = await awsCleanupRecoveryFingerprint(lease);
+    const evidence = await this.observeLegacyCleanupScope(lease);
+    const current = await this.storage.get<LeaseRecord>(leaseKey(lease.id));
+    const claimUnchanged = Boolean(
+      current &&
+      current.providerScope == null &&
+      !current.cleanupStartedAt &&
+      !current.provisioningRequestStartedAt &&
+      (await awsCleanupRecoveryFingerprint(current)) === claimFingerprint,
+    );
+    return {
+      basis: "aws-cloudtrail-run-instances",
+      ...evidence,
+      resourceAbsent: true,
+      remainingCleanup: ["owned-key", "provider-access"],
+      claimUnchanged,
+      ...(claimUnchanged ? { claimFingerprint } : {}),
+    };
+  }
+
+  async recoverCleanup(
+    lease: LeaseRecord,
+    expectedClaimFingerprint: string,
+    actor: string,
+    commitGuard: <T>(commit: () => Promise<T>) => Promise<T>,
+    commitScopeRecovery?: ProviderScopeRecoveryCommit,
+  ): Promise<AWSLegacyCleanupAudit> {
+    const existing = await this.recordedCleanupRecovery(lease);
+    if (existing) {
+      if (existing.claimFingerprint !== expectedClaimFingerprint) {
+        throw new ProviderResourceUnresolvedError(
+          "AWS cleanup recovery was recorded for another binding",
+        );
+      }
+      return commitGuard(async () => existing);
+    }
+    if (
+      !commitScopeRecovery ||
+      !actor.trim() ||
+      actor.length > 256 ||
+      (await awsCleanupRecoveryFingerprint(lease)) !== expectedClaimFingerprint
+    ) {
+      throw new ProviderResourceUnresolvedError(
+        "AWS recovery binding changed; inspect cleanup again",
+      );
+    }
+    const evidence = await this.observeLegacyCleanupScope(lease);
+    const audit: AWSLegacyCleanupAudit = {
+      leaseID: lease.id,
+      region: evidence.region,
+      providerScope: evidence.providerScope,
+      cloudID: lease.cloudID,
+      eventID: evidence.eventID,
+      eventTime: evidence.eventTime,
+      actor,
+      recoveredAt: new Date().toISOString(),
+      claimFingerprint: expectedClaimFingerprint,
+    };
+    return commitScopeRecovery(
+      { providerScope: evidence.providerScope, resourceAbsent: true },
+      async (transaction) => {
+        const key = awsCleanupRecoveryAuditKey(lease.id);
+        if (await transaction.get(key)) {
+          throw new ProviderResourceUnresolvedError("AWS recovery evidence changed before commit");
+        }
+        return async () => {
+          await transaction.put(key, audit);
+          return audit;
+        };
+      },
+    );
   }
 
   private async verifyLeaseOperationAuthority(
@@ -28627,6 +28693,7 @@ export class AWSProvider implements CloudProvider {
               kind: promoted.kind ?? "aws-ami",
               region: promoted.region ?? config.awsRegion,
               promotedAt: promoted.promotedAt,
+              ...(promoted.revision ? { revision: promoted.revision } : {}),
             },
           }
         : {}),
