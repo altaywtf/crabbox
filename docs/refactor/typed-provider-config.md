@@ -65,6 +65,13 @@ representation. Replacing lists register before ordinary flags, and appending
 lists register afterward. Registration neither applies values to configuration
 nor records source provenance.
 
+Hostinger's eleven-field owner is `internal/cli/config_hostinger.go`. Its API
+token remains a trusted-file/environment field without an argv binding. A
+shallow file snapshot preserves the existing conditional boolean admission
+without mutating the DTO. Accepted user/root markers and the immediate generic
+SSH-user flag effect remain in wrappers, followed by the existing exact-provider
+default application. All compiled defaults are generated scalar values.
+
 Generation owns mechanical bindings, not provider policy. Other providers retain
 their existing configuration code. Provider selection, command routing, config
 CLI presentation, and backend lifecycle are not part of generation.

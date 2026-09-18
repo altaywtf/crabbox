@@ -18038,3 +18038,79 @@ func TestSyncSourceConfig(t *testing.T) {
 		t.Fatal("active invalid source accepted")
 	}
 }
+
+func TestHostingerBindingDefaultsAndFileAdmission(t *testing.T) {
+	clearConfigEnv(t)
+	wantDefaults := HostingerConfig{APIURL: "https://developers.hostinger.com", HostnamePrefix: "crabbox", User: "root", ReleaseAction: "stop"}
+	if got := baseConfig().Hostinger; !reflect.DeepEqual(got, wantDefaults) {
+		t.Fatalf("Hostinger defaults=%#v", got)
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, allowed := range []bool{false, true} {
+			for _, raw := range []string{"", "  ", " fixture "} {
+				cfg := baseConfig()
+				cfg.Hostinger.AllowPurchase = !allowed
+				priorSSHUser := cfg.SSHUser
+				value, originalValue := allowed, allowed
+				input := &fileHostingerConfig{APIURL: "https://hostinger.example.test", ItemID: "fixture-item", PaymentMethodID: "101", TemplateID: "202", DataCenterID: "303", User: raw, WorkRoot: raw, AllowPurchase: &value}
+				snapshot := *input
+				snapshot.AllowPurchase = new(bool)
+				*snapshot.AllowPurchase = allowed
+				if err := applyFileConfigWithTrust(&cfg, fileConfig{Hostinger: input}, trusted); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(*input, snapshot) || input.AllowPurchase != &value || value != originalValue {
+					t.Fatal("file binding mutated its input DTO or bool pointer")
+				}
+				want := wantDefaults
+				want.AllowPurchase = !allowed
+				if trusted {
+					want.APIURL, want.ItemID, want.PaymentMethodID, want.TemplateID, want.DataCenterID = input.APIURL, input.ItemID, input.PaymentMethodID, input.TemplateID, input.DataCenterID
+				}
+				if raw != "" {
+					want.User, want.WorkRoot = raw, raw
+				}
+				if trusted || !allowed {
+					want.AllowPurchase = allowed
+				}
+				if !reflect.DeepEqual(cfg.Hostinger, want) || cfg.SSHUser != priorSSHUser {
+					t.Fatalf("trusted=%t bool=%t raw=%q bindings=%#v want=%#v", trusted, allowed, raw, cfg.Hostinger, want)
+				}
+				if IsHostingerUserExplicit(&cfg) != (raw != "") || IsHostingerWorkRootExplicit(&cfg) != (raw != "") {
+					t.Fatal("file explicit-field markers changed")
+				}
+				accepted := trusted || !allowed || raw != ""
+				if (cfg.inputProvenance["hostinger"].values != 0) != accepted {
+					t.Fatal("file input acceptance changed")
+				}
+			}
+		}
+	}
+}
+
+func TestHostingerBindingEnvironmentAliasesAndMarkers(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("HOSTINGER_API_URL", "https://alias.example.test")
+	for _, raw := range []string{"", "  ", " fixture "} {
+		t.Setenv("CRABBOX_HOSTINGER_API_URL", raw)
+		t.Setenv("CRABBOX_HOSTINGER_USER", raw)
+		t.Setenv("CRABBOX_HOSTINGER_WORK_ROOT", raw)
+		t.Setenv("CRABBOX_HOSTINGER_ALLOW_PURCHASE", "false")
+		cfg := baseConfig()
+		cfg.Hostinger.AllowPurchase = true
+		priorSSHUser := cfg.SSHUser
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		wantURL, wantUser := raw, raw
+		if raw == "" {
+			wantURL, wantUser = "https://alias.example.test", "root"
+		}
+		if cfg.Hostinger.APIURL != wantURL || cfg.Hostinger.User != wantUser || cfg.Hostinger.WorkRoot != raw || cfg.Hostinger.AllowPurchase || cfg.SSHUser != priorSSHUser {
+			t.Fatalf("raw=%q environment bindings=%#v", raw, cfg.Hostinger)
+		}
+		if IsHostingerUserExplicit(&cfg) != (raw != "") || IsHostingerWorkRootExplicit(&cfg) != (raw != "") || cfg.inputProvenance["hostinger"].values == 0 {
+			t.Fatal("environment markers/acceptance changed")
+		}
+	}
+}

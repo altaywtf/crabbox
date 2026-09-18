@@ -503,20 +503,6 @@ type UnikraftCloudConfig struct {
 	MemoryMB int
 }
 
-type HostingerConfig struct {
-	APIToken        string
-	APIURL          string
-	ItemID          string
-	PaymentMethodID string
-	TemplateID      string
-	DataCenterID    string
-	HostnamePrefix  string
-	User            string
-	WorkRoot        string
-	AllowPurchase   bool
-	ReleaseAction   string
-}
-
 type IsloConfig struct {
 	APIKey         string
 	BaseURL        string
@@ -1998,12 +1984,7 @@ func baseConfig() Config {
 		Blacksmith: defaultBlacksmithConfig(),
 		NvidiaBrev: defaultNvidiaBrevConfig(),
 		Nebius:     (NebiusConfig{}).WithRuntimeDefaults(),
-		Hostinger: HostingerConfig{
-			APIURL:         "https://developers.hostinger.com",
-			HostnamePrefix: "crabbox",
-			User:           "root",
-			ReleaseAction:  "stop",
-		},
+		Hostinger:  defaultHostingerConfig(),
 		Islo: IsloConfig{
 			BaseURL:  "https://api.islo.dev",
 			Image:    isloImage,
@@ -2529,20 +2510,6 @@ type fileUnikraftCloudConfig struct {
 	Metro    string `yaml:"metro,omitempty"`
 	Image    string `yaml:"image,omitempty"`
 	MemoryMB int    `yaml:"memoryMB,omitempty"`
-}
-
-type fileHostingerConfig struct {
-	APIToken        string `yaml:"apiToken,omitempty"`
-	APIURL          string `yaml:"apiUrl,omitempty"`
-	ItemID          string `yaml:"itemId,omitempty"`
-	PaymentMethodID string `yaml:"paymentMethodId,omitempty"`
-	TemplateID      string `yaml:"templateId,omitempty"`
-	DataCenterID    string `yaml:"dataCenterId,omitempty"`
-	HostnamePrefix  string `yaml:"hostnamePrefix,omitempty"`
-	User            string `yaml:"user,omitempty"`
-	WorkRoot        string `yaml:"workRoot,omitempty"`
-	AllowPurchase   *bool  `yaml:"allowPurchase,omitempty"`
-	ReleaseAction   string `yaml:"releaseAction,omitempty"`
 }
 
 type fileIsloConfig struct {
@@ -4386,54 +4353,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 	if err := applyNvidiaBrevFileConfig(cfg, file.NvidiaBrev, trusted, inputSource); err != nil {
 		return err
 	}
-	if file.Hostinger != nil {
-		if trusted && file.Hostinger.APIToken != "" {
-			cfg.Hostinger.APIToken = file.Hostinger.APIToken
-			recordConfigInput(cfg, "hostinger", inputSource, true)
-		}
-		if trusted && file.Hostinger.APIURL != "" {
-			cfg.Hostinger.APIURL = file.Hostinger.APIURL
-			recordConfigInput(cfg, "hostinger", inputSource, true)
-		}
-		if trusted && file.Hostinger.ItemID != "" {
-			cfg.Hostinger.ItemID = file.Hostinger.ItemID
-			recordConfigInput(cfg, "hostinger", inputSource, true)
-		}
-		if trusted && file.Hostinger.PaymentMethodID != "" {
-			cfg.Hostinger.PaymentMethodID = file.Hostinger.PaymentMethodID
-			recordConfigInput(cfg, "hostinger", inputSource, true)
-		}
-		if trusted && file.Hostinger.TemplateID != "" {
-			cfg.Hostinger.TemplateID = file.Hostinger.TemplateID
-			recordConfigInput(cfg, "hostinger", inputSource, true)
-		}
-		if trusted && file.Hostinger.DataCenterID != "" {
-			cfg.Hostinger.DataCenterID = file.Hostinger.DataCenterID
-			recordConfigInput(cfg, "hostinger", inputSource, true)
-		}
-		if file.Hostinger.HostnamePrefix != "" {
-			cfg.Hostinger.HostnamePrefix = file.Hostinger.HostnamePrefix
-			recordConfigInput(cfg, "hostinger", inputSource, true)
-		}
-		if file.Hostinger.User != "" {
-			cfg.Hostinger.User = file.Hostinger.User
-			recordConfigInput(cfg, "hostinger", inputSource, true)
-			MarkHostingerUserExplicit(cfg)
-		}
-		if file.Hostinger.WorkRoot != "" {
-			cfg.Hostinger.WorkRoot = file.Hostinger.WorkRoot
-			recordConfigInput(cfg, "hostinger", inputSource, true)
-			MarkHostingerWorkRootExplicit(cfg)
-		}
-		if file.Hostinger.AllowPurchase != nil && (trusted || !*file.Hostinger.AllowPurchase) {
-			cfg.Hostinger.AllowPurchase = *file.Hostinger.AllowPurchase
-			recordConfigInput(cfg, "hostinger", inputSource, true)
-		}
-		if file.Hostinger.ReleaseAction != "" {
-			cfg.Hostinger.ReleaseAction = file.Hostinger.ReleaseAction
-			recordConfigInput(cfg, "hostinger", inputSource, true)
-		}
+	if err := applyHostingerFileConfig(cfg, file.Hostinger, trusted, inputSource); err != nil {
+		return err
 	}
+
 	{
 		applied, err := cfg.Wandb.applyFile(file.Wandb)
 		recordConfigInput(cfg, "wandb", inputSource, applied.InputAccepted)
@@ -6297,28 +6220,10 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	cfg.Hostinger.APIToken = configInputEnvString(cfg, "hostinger", cfg.Hostinger.APIToken, "CRABBOX_HOSTINGER_API_TOKEN", "HOSTINGER_API_TOKEN")
-	cfg.Hostinger.APIURL = configInputEnvString(cfg, "hostinger", cfg.Hostinger.APIURL, "CRABBOX_HOSTINGER_API_URL", "HOSTINGER_API_URL")
-	cfg.Hostinger.ItemID = configInputEnvString(cfg, "hostinger", cfg.Hostinger.ItemID, "CRABBOX_HOSTINGER_ITEM_ID")
-	cfg.Hostinger.PaymentMethodID = configInputEnvString(cfg, "hostinger", cfg.Hostinger.PaymentMethodID, "CRABBOX_HOSTINGER_PAYMENT_METHOD_ID")
-	cfg.Hostinger.TemplateID = configInputEnvString(cfg, "hostinger", cfg.Hostinger.TemplateID, "CRABBOX_HOSTINGER_TEMPLATE_ID")
-	cfg.Hostinger.DataCenterID = configInputEnvString(cfg, "hostinger", cfg.Hostinger.DataCenterID, "CRABBOX_HOSTINGER_DATA_CENTER_ID")
-	cfg.Hostinger.HostnamePrefix = configInputEnvString(cfg, "hostinger", cfg.Hostinger.HostnamePrefix, "CRABBOX_HOSTINGER_HOSTNAME_PREFIX")
-	if user := os.Getenv("CRABBOX_HOSTINGER_USER"); user != "" {
-		cfg.Hostinger.User = user
-		recordConfigInput(cfg, "hostinger", configInputEnvironment, true)
-		MarkHostingerUserExplicit(cfg)
+	if err := applyHostingerEnvironmentConfig(cfg); err != nil {
+		return err
 	}
-	if workRoot := os.Getenv("CRABBOX_HOSTINGER_WORK_ROOT"); workRoot != "" {
-		cfg.Hostinger.WorkRoot = workRoot
-		recordConfigInput(cfg, "hostinger", configInputEnvironment, true)
-		MarkHostingerWorkRootExplicit(cfg)
-	}
-	if value, ok := getenvBool("CRABBOX_HOSTINGER_ALLOW_PURCHASE"); ok {
-		cfg.Hostinger.AllowPurchase = value
-		recordConfigInput(cfg, "hostinger", configInputEnvironment, true)
-	}
-	cfg.Hostinger.ReleaseAction = configInputEnvString(cfg, "hostinger", cfg.Hostinger.ReleaseAction, "CRABBOX_HOSTINGER_RELEASE_ACTION")
+
 	{
 		applied, err := cfg.Wandb.applyEnv()
 		recordConfigInput(cfg, "wandb", configInputEnvironment, applied.InputAccepted)
