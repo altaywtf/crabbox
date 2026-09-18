@@ -4,7 +4,7 @@
 
 ### Features
 
-- Add durable fixed lease IDs for Agent Sandbox with exact Kubernetes identity replay and foreground terminal confirmation with a two-minute cleanup budget. [Issue 1742](https://github.com/openclaw/crabbox/issues/1742). [PR 2342](https://github.com/openclaw/crabbox/pull/2342). Thanks @jimmybrancaccio.
+- Add durable fixed lease IDs for Agent Sandbox with exact Kubernetes identity replay and foreground terminal confirmation with a two-minute cleanup budget, and adapter completion that preserves terminal receipts outside active inventory. [Issue 1742](https://github.com/openclaw/crabbox/issues/1742). [PR 2342](https://github.com/openclaw/crabbox/pull/2342). Thanks @jimmybrancaccio.
 
 ### Fixes
 
