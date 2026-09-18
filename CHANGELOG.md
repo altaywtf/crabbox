@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Features
+
+- Add durable fixed lease IDs for Agent Sandbox with exact Kubernetes identity replay and foreground terminal confirmation. [Issue 1742](https://github.com/openclaw/crabbox/issues/1742).
+
 ### Fixes
 
 - Raise production coordinator checkpoint limits to 100 globally, per owner, and per organization so retained worker caches do not exhaust the previous 10-checkpoint owner limit.
