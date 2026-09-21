@@ -500,6 +500,10 @@ type ParallelsConfig struct {
 	Templates        map[string]ParallelsTemplateConfig
 	Hosts            []ParallelsHostConfig
 	SelectedHost     string
+	// MaxVMs caps concurrent Crabbox VMs on the direct host. A selected fleet
+	// entry's own MaxVMs always wins, and this is not a default for fleet
+	// entries that omit it.
+	MaxVMs int
 }
 
 type ParallelsTemplateConfig struct {
@@ -920,59 +924,12 @@ func applyProviderConfigDefaults(cfg *Config) error {
 			if err := defaulter.ApplyConfigDefaults(cfg); err != nil {
 				return err
 			}
+			if phase, ok := provider.(ProviderConfigDefaultsPhase); ok && phase.ConfigDefaultsTargetFinalization() == ProviderConfigDefaultsCallerFinalizes {
+				return nil
+			}
 			normalizeTargetConfig(cfg)
 			return validateTargetConfig(*cfg)
 		}
-	}
-	if cfg.Provider == "hyperv" {
-		if !IsTargetExplicit(cfg) {
-			cfg.TargetOS = targetWindows
-		}
-		cfg.SSHFallbackPorts = nil
-		if cfg.HyperV.User != "" {
-			cfg.SSHUser = cfg.HyperV.User
-		}
-		if cfg.HyperV.WorkRoot != "" {
-			cfg.WorkRoot = cfg.HyperV.WorkRoot
-		}
-		cfg.SSHPort = "22"
-		return nil
-	}
-	if cfg.Provider == "windows-sandbox" || cfg.Provider == "wsb" || cfg.Provider == "windows-sandbox-provider" {
-		if IsTargetExplicit(cfg) && normalizeTargetOS(cfg.TargetOS) != targetWindows {
-			return Exit(2, "provider=windows-sandbox supports target=windows only")
-		}
-		if cfg.TargetOS == "" || (!IsTargetExplicit(cfg) && cfg.TargetOS == targetLinux) {
-			cfg.TargetOS = targetWindows
-		}
-		if cfg.explicitWindowsMode != "" && normalizeWindowsMode(cfg.explicitWindowsMode) != windowsModeNormal {
-			return Exit(2, "provider=windows-sandbox supports windows.mode=normal only")
-		}
-		cfg.WindowsMode = windowsModeNormal
-		if cfg.WindowsSandbox.Workdir == "" {
-			cfg.WindowsSandbox.Workdir = `C:\crabbox-work`
-		}
-		cfg.WorkRoot = cfg.WindowsSandbox.Workdir
-		return nil
-	}
-	if cfg.Provider == "exe-dev" || cfg.Provider == "exedev" || cfg.Provider == "exe" {
-		if cfg.ExeDev.User != "" {
-			cfg.SSHUser = cfg.ExeDev.User
-		} else if cfg.SSHUser == baseConfig().SSHUser {
-			cfg.SSHUser = getenv("USER", cfg.SSHUser)
-		}
-		if cfg.SSHPort == "" || cfg.SSHPort == baseConfig().SSHPort {
-			cfg.SSHPort = "22"
-		}
-		cfg.SSHFallbackPorts = nil
-		cfg.ExeDev.WorkRoot = ResolveInheritedWorkRoot(cfg.ExeDev.WorkRoot, cfg.WorkRoot, ExeDevWorkRootFallback)
-		if cfg.ExeDev.WorkRoot != "" {
-			cfg.WorkRoot = cfg.ExeDev.WorkRoot
-		}
-		if cfg.TargetOS == "" {
-			cfg.TargetOS = targetLinux
-		}
-		return nil
 	}
 	if cfg.Provider == "tart" || cfg.Provider == "local-tart" || cfg.Provider == "macos-vm" {
 		if cfg.Tart.User != "" {
@@ -1988,6 +1945,7 @@ type fileParallelsConfig struct {
 	Password         string                                 `yaml:"password,omitempty"`
 	WorkRoot         string                                 `yaml:"workRoot,omitempty"`
 	StartupTimeout   string                                 `yaml:"startupTimeout,omitempty"`
+	MaxVMs           *int                                   `yaml:"maxVMs,omitempty"`
 	Templates        map[string]fileParallelsTemplateConfig `yaml:"templates,omitempty"`
 	Hosts            []fileParallelsHostConfig              `yaml:"hosts,omitempty"`
 }
@@ -3099,6 +3057,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 		if file.Parallels.WorkRoot != "" {
 			cfg.Parallels.WorkRoot = file.Parallels.WorkRoot
+			recordConfigInput(cfg, "parallels", inputSource, true)
+		}
+		if file.Parallels.MaxVMs != nil {
+			cfg.Parallels.MaxVMs = *file.Parallels.MaxVMs
 			recordConfigInput(cfg, "parallels", inputSource, true)
 		}
 		recordConfigInput(cfg, "parallels", inputSource, applyLeaseDuration(&cfg.Parallels.StartupTimeout, file.Parallels.StartupTimeout))
@@ -4563,6 +4525,7 @@ func applyEnv(cfg *Config) error {
 	cfg.Parallels.User = configInputEnvString(cfg, "parallels", cfg.Parallels.User, "CRABBOX_PARALLELS_USER")
 	cfg.Parallels.Password = configInputEnvString(cfg, "parallels", cfg.Parallels.Password, "CRABBOX_PARALLELS_PASSWORD")
 	cfg.Parallels.WorkRoot = configInputEnvString(cfg, "parallels", cfg.Parallels.WorkRoot, "CRABBOX_PARALLELS_WORK_ROOT")
+	cfg.Parallels.MaxVMs = configInputEnvInt(cfg, "parallels", cfg.Parallels.MaxVMs, "CRABBOX_PARALLELS_MAX_VMS")
 	if startupTimeout := os.Getenv("CRABBOX_PARALLELS_STARTUP_TIMEOUT"); startupTimeout != "" {
 		recordConfigInput(cfg, "parallels", configInputEnvironment, applyLeaseDuration(&cfg.Parallels.StartupTimeout, startupTimeout))
 	}
@@ -5853,6 +5816,10 @@ func IncusServerTypeForConfig(cfg Config) string {
 func IsArchitectureExplicit(cfg Config) bool {
 	return cfg.architectureExplicit
 }
+
+// ExplicitWindowsModeValue returns the saved explicit mode, without inferring a
+// value from the separate command-flag marker used by IsWindowsModeExplicit.
+func ExplicitWindowsModeValue(cfg Config) string { return cfg.explicitWindowsMode }
 
 func IsWindowsModeExplicit(cfg Config) bool {
 	return cfg.explicitWindowsMode != "" || cfg.windowsModeFlagExplicit

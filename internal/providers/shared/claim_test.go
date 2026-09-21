@@ -596,3 +596,92 @@ func TestValidateSandboxOwnershipMetadata(t *testing.T) {
 		})
 	}
 }
+
+func TestFinishScopedLeaseAdmissionAndProjection(t *testing.T) {
+	for _, mode := range []string{"observe", "invalid", "different repo", "reclaim"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			const id = "fixture_resource"
+			repo := t.TempDir()
+			if err := core.ClaimLeaseForRepoProviderScopePond(id, "", "example", "scope", "pond", repo, 3*time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			before, err := core.ReadLeaseClaim(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			invalid := errors.New("adapter scope mismatch")
+			calls := 0
+			opts := ScopedLeaseFinishOptions{Provider: "example", LeasePrefix: "fixture_", IdleTimeout: 9 * time.Minute,
+				ValidateClaim: func(got core.LeaseClaim) error {
+					calls++
+					if !reflect.DeepEqual(got, before) {
+						t.Fatal("validation received different snapshot")
+					}
+					if mode == "invalid" {
+						return invalid
+					}
+					return nil
+				},
+			}
+			if mode != "observe" {
+				opts.RepoRoot = t.TempDir()
+			}
+			opts.Reclaim = mode == "reclaim"
+			lease, resource, slug, err := FinishScopedLease(before, opts)
+			if calls != 1 {
+				t.Fatalf("validation calls=%d", calls)
+			}
+			after, readErr := core.ReadLeaseClaim(id)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if mode == "invalid" || mode == "different repo" {
+				if err == nil || lease != "" || resource != "" || slug != "" {
+					t.Fatalf("rejected result=%q/%q/%q err=%v", lease, resource, slug, err)
+				}
+				if mode == "invalid" && !errors.Is(err, invalid) {
+					t.Fatalf("validation error lost: %v", err)
+				}
+				if !reflect.DeepEqual(after, before) {
+					t.Fatal("rejected admission changed claim")
+				}
+				return
+			}
+			if err != nil || lease != id || resource != "resource" || slug != core.NewLeaseSlug(id) {
+				t.Fatalf("projection=%q/%q/%q err=%v", lease, resource, slug, err)
+			}
+			if mode == "observe" {
+				if !reflect.DeepEqual(after, before) {
+					t.Fatal("empty repository root published claim")
+				}
+			} else if after.RepoRoot != opts.RepoRoot || after.ProviderScope != before.ProviderScope || after.Pond != before.Pond || after.Slug != before.Slug || after.IdleTimeoutSeconds != 180 {
+				t.Fatalf("reclaim changed preserved fields: %#v", after)
+			}
+		})
+	}
+}
+
+func TestClaimLifecycleLabels(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		claim core.LeaseClaim
+		want  map[string]string
+	}{
+		{"empty", core.LeaseClaim{}, map[string]string{}},
+		{"persisted fallback", core.LeaseClaim{IdleTimeoutSeconds: 600, ClaimedAt: " 1970-01-01T00:01:40Z ", LastUsedAt: "1970-01-01T00:03:20.123Z", Labels: map[string]string{"idle_timeout_secs": "300", "private_metadata": "preserve: /exact/path"}}, map[string]string{"idle_timeout": "600", "idle_timeout_secs": "600", "created_at": "100", "last_touched_at": "200", "private_metadata": "preserve: /exact/path"}},
+		{"labels retained", core.LeaseClaim{IdleTimeoutSeconds: 0, ClaimedAt: "invalid", LastUsedAt: "invalid", Labels: map[string]string{"created_at": "100", "last_touched_at": "200", "idle_timeout_secs": "300"}}, map[string]string{"created_at": "100", "last_touched_at": "200", "idle_timeout_secs": "300"}},
+		{"invalid fallbacks", core.LeaseClaim{ClaimedAt: "invalid", LastUsedAt: "invalid", Labels: map[string]string{"created_at": ""}}, map[string]string{"created_at": ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ClaimLifecycleLabels(tc.claim)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("got %#v want %#v", got, tc.want)
+			}
+			got["fixture"] = "changed"
+			if tc.claim.Labels["fixture"] != "" {
+				t.Fatal("projection aliases persisted metadata")
+			}
+		})
+	}
+}

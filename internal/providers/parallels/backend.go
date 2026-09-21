@@ -47,10 +47,20 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 	if source == "" {
 		return core.LeaseTarget{}, core.Exit(2, "provider=parallels requires --parallels-source, --parallels-template, or parallels.source")
 	}
-	selected, err := core.SelectParallelsFleetConfig(ctx, cfg, b.RT.Exec, source)
+	// Hold the host's capacity reservation from the maxVMs count through the clone,
+	// so concurrent forks cannot all pass the gate on the same pre-clone count.
+	selected, releaseCapacity, err := core.ReserveParallelsFleetCapacity(ctx, cfg, b.RT.Exec, source)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	capacityHeld := true
+	releaseCapacityOnce := func() {
+		if capacityHeld {
+			capacityHeld = false
+			releaseCapacity()
+		}
+	}
+	defer releaseCapacityOnce()
 	cfg = selected
 	client := core.NewParallelsClient(cfg, b.RT.Exec)
 	if err := client.ValidateMacOSBootstrapKey(ctx); err != nil {
@@ -93,6 +103,9 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 	fmt.Fprintf(b.RT.Stderr, "provisioning provider=parallels lease=%s slug=%s host=%s source=%s snapshot=%s clone_mode=%s keep=%v\n",
 		leaseID, slug, parallelsHostName(cfg), source, blank(snapshotID, "-"), blank(cfg.Parallels.CloneMode, "linked"), keep)
 	server, err := client.Clone(ctx, source, snapshotID, leaseID, slug, keep)
+	// The clone now counts against maxVMs for every later reservation, so the rest of
+	// bootstrap does not need to keep other forks waiting.
+	releaseCapacityOnce()
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -100,7 +113,7 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 		cleanupVM(server.CloudID)
 		return core.LeaseTarget{}, err
 	}
-	vm, err := client.WaitForIP(ctx, server.CloudID, cfg.Parallels.StartupTimeout)
+	vm, err := client.WaitForIP(ctx, server.CloudID, cfg.Parallels.StartupTimeout, core.ParallelsIPWaitAcquisition)
 	if err != nil {
 		cleanupVM(server.CloudID)
 		return core.LeaseTarget{}, err
@@ -207,7 +220,7 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 					client = core.NewParallelsClient(candidate, b.RT.Exec)
 				}
 				if vm.IP == "" && strings.EqualFold(vm.State, "running") {
-					discovered, err := client.WaitForIP(ctx, vm.ID, 30*time.Second)
+					discovered, err := client.WaitForIP(ctx, vm.ID, 30*time.Second, core.ParallelsIPWaitExisting)
 					if err != nil {
 						if !req.ReleaseOnly && !req.StatusOnly {
 							return core.LeaseTarget{}, err
@@ -403,7 +416,8 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRe
 
 func (b *leaseBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
 	server := req.Lease.Server
-	server.Labels = core.TouchDirectLeaseLabels(server.Labels, b.Cfg, req.State, time.Now().UTC())
+	// Preserve stored policy only when the caller omitted an override.
+	server.Labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(server.Labels, b.Cfg, req.State, time.Now().UTC(), req.IdleTimeoutOverride)
 	core.NewParallelsClient(b.configForLease(ctx, req.Lease), b.RT.Exec).SetLeaseLabels(shared.FirstNonBlankTrimmed(req.Lease.LeaseID, server.Labels["lease"]), server.Labels)
 	return server, nil
 }
