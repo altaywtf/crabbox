@@ -19,7 +19,8 @@ func TestNvidiaBrevParseWorkspaceJSONShapes(t *testing.T) {
 		wantLen int
 		wantErr string
 	}{
-		{name: "empty stdout", stdout: "", wantLen: 0},
+		{name: "empty stdout", stdout: "", wantErr: "unexpected end"},
+		{name: "whitespace stdout", stdout: " \n\t", wantErr: "unexpected end"},
 		{name: "null object", stdout: `{"workspaces": null}`, wantLen: 0},
 		{name: "empty object array", stdout: `{"workspaces": []}`, wantLen: 0},
 		{name: "populated object array", stdout: `{"workspaces": [{"id":"ws-1","name":"crabbox-demo-123","status":"RUNNING"}]}`, wantLen: 1},
@@ -249,6 +250,7 @@ func TestNvidiaBrevClientRejectsOrgScopedMutations(t *testing.T) {
 
 func isolateBrevContextFiles(t *testing.T) {
 	t.Helper()
+	t.Setenv("BREV_API_KEY", "")
 	dir := t.TempDir()
 	oldMeta := brevWorkspaceMetaPath
 	brevWorkspaceMetaPath = filepath.Join(dir, "workspace.json")
