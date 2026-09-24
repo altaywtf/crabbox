@@ -187,7 +187,7 @@ func TestStaticReleaseWithoutClaimDoesNotStop(t *testing.T) {
 	if stops := runner.callsFor("down"); len(stops) != 0 {
 		t.Fatalf("unclaimed release stopped the host: %#v", stops)
 	}
-	if !strings.Contains(stderr.String(), "claim is absent or changed") {
+	if !strings.Contains(stderr.String(), "carries no claim snapshot") {
 		t.Fatalf("stderr=%q", stderr.String())
 	}
 }
@@ -438,5 +438,30 @@ func TestStaticStopFromFreshResolve(t *testing.T) {
 	}
 	if stops := runner.callsFor("down"); len(stops) != 1 {
 		t.Fatalf("resolved release stops=%#v want 1", stops)
+	}
+}
+
+func TestStaticStopSkipsOlderAcquisitionOnSameBackend(t *testing.T) {
+	cfg, runner := staticPowerFixture(t, nil)
+	cfg.Static.ID = "static_power_reacquired"
+	backend := newStaticPowerBackend(cfg, runner, io.Discard)
+	repo := core.Repo{Root: t.TempDir()}
+	older, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newer, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Touch(context.Background(), core.TouchRequest{Lease: newer, State: "running"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: older}); err != nil {
+		t.Fatal(err)
+	}
+	if stops := runner.callsFor("down"); len(stops) != 0 {
+		t.Fatalf("older acquisition stopped the host under a newer one: %#v", stops)
 	}
 }
