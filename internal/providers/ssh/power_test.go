@@ -279,3 +279,33 @@ func TestStaticReleaseWaitsForConcurrentAcquireBeforeStopping(t *testing.T) {
 		t.Fatalf("stop raced a concurrent acquisition: %#v", stops)
 	}
 }
+
+func TestTailBufferKeepsBoundedSuffix(t *testing.T) {
+	tail := &tailBuffer{limit: 8}
+	for _, chunk := range []string{"abc", "defgh", "ij", strings.Repeat("x", 20) + "12345678", "zz"} {
+		if n, err := tail.Write([]byte(chunk)); n != len(chunk) || err != nil {
+			t.Fatalf("write %q n=%d err=%v", chunk, n, err)
+		}
+		if len(tail.data) > tail.limit || cap(tail.data) > 2*tail.limit {
+			t.Fatalf("tail grew len=%d cap=%d", len(tail.data), cap(tail.data))
+		}
+	}
+	if got := tail.String(); got != "345678zz" {
+		t.Fatalf("tail=%q", got)
+	}
+}
+
+func TestStaticPowerCommandCancellationIsNotTimeout(t *testing.T) {
+	cfg, runner := staticPowerFixture(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	runner.result = func([]string, io.Writer) (core.LocalCommandResult, error) {
+		cancel()
+		return core.LocalCommandResult{ExitCode: -1}, context.Canceled
+	}
+
+	err := newStaticPowerBackend(cfg, runner, io.Discard).runStaticPowerCommand(ctx, "static.startCommand", cfg.Static.StartCommand, "static_power_cancel", cfg.Static.Host)
+
+	if err == nil || strings.Contains(err.Error(), "timeout") || core.ExitCodeForError(err, 0) != 1 {
+		t.Fatalf("err=%v", err)
+	}
+}

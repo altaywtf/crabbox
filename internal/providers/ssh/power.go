@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -55,7 +56,7 @@ func (b *staticLeaseBackend) runStaticPowerCommand(ctx context.Context, field st
 	if err == nil {
 		err = fmt.Errorf("exit status %d", result.ExitCode)
 	}
-	if ctx.Err() != nil {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		err = fmt.Errorf("%w (timeout %s)", err, staticPowerCommandTimeout)
 	}
 	code := result.ExitCode
@@ -105,11 +106,16 @@ type tailBuffer struct {
 func (t *tailBuffer) Write(p []byte) (int, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.data = append(t.data, p...)
-	if extra := len(t.data) - t.limit; extra > 0 {
-		t.data = append(t.data[:0], t.data[extra:]...)
+	n := len(p)
+	if n >= t.limit {
+		t.data = append(t.data[:0], p[n-t.limit:]...)
+		return n, nil
 	}
-	return len(p), nil
+	if keep := t.limit - n; len(t.data) > keep {
+		t.data = append(t.data[:0], t.data[len(t.data)-keep:]...)
+	}
+	t.data = append(t.data, p...)
+	return n, nil
 }
 
 func (t *tailBuffer) String() string {
