@@ -27,6 +27,21 @@ func NewStaticSSHLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.R
 }
 
 func (b *staticLeaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+	host := strings.TrimSpace(b.Cfg.Static.Host)
+	if !staticPowerConfigured(b.Cfg) || host == "" {
+		return b.acquire(ctx, req, "")
+	}
+	unlock, err := lockStaticHostPower(ctx, host)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	defer unlock()
+	return b.acquire(ctx, req, host)
+}
+
+// acquire runs static.startCommand when powerHost is set; the caller holds
+// that host's power lock through claim publication.
+func (b *staticLeaseBackend) acquire(ctx context.Context, req core.AcquireRequest, powerHost string) (_ core.LeaseTarget, err error) {
 	cfg := b.Cfg
 	if req.RequestedSlug != "" {
 		_, _, leaseID, err := core.StaticLease(cfg)
@@ -73,6 +88,18 @@ func (b *staticLeaseBackend) Acquire(ctx context.Context, req core.AcquireReques
 	}
 	fmt.Fprintf(b.RT.Stderr, "using static target lease=%s slug=%s target=%s windows_mode=%s host=%s keep=%v\n", leaseID, core.ServerSlug(server), b.Cfg.TargetOS, b.Cfg.WindowsMode, target.Host, req.Keep)
 	route := architectureEndpoint(target)
+	if powerHost != "" && len(cfg.Static.StartCommand) > 0 {
+		if err := b.startStaticHost(ctx, leaseID, powerHost); err != nil {
+			return core.LeaseTarget{}, err
+		}
+		if !exists {
+			defer func() {
+				if err != nil {
+					b.stopStaticHostIfUnused(context.WithoutCancel(ctx), leaseID, powerHost)
+				}
+			}()
+		}
+	}
 	if err := waitForSSH(ctx, &target, b.RT.Stderr); err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -244,10 +271,41 @@ func (b *staticLeaseBackend) Doctor(ctx context.Context, req core.DoctorRequest)
 	}, nil
 }
 
-func (b *staticLeaseBackend) ReleaseLease(_ context.Context, req core.ReleaseLeaseRequest) error {
+func (b *staticLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
+	powerHost := b.staticReleasePowerHost(req.Lease)
+	if powerHost != "" {
+		unlock, err := lockStaticHostPower(ctx, powerHost)
+		if err != nil {
+			fmt.Fprintf(b.RT.Stderr, "warning: skipped static.stopCommand host=%s: %v\n", powerHost, err)
+			powerHost = ""
+		} else {
+			defer unlock()
+		}
+	}
 	core.RemoveLeaseClaim(req.Lease.LeaseID)
 	b.clearAcquiredLease(req.Lease.LeaseID)
+	if powerHost != "" {
+		b.stopStaticHostIfUnused(ctx, req.Lease.LeaseID, powerHost)
+	}
 	return nil
+}
+
+// staticReleasePowerHost returns the host whose stop command applies to the
+// released lease, or "" when the configured command targets another host.
+func (b *staticLeaseBackend) staticReleasePowerHost(lease core.LeaseTarget) string {
+	if len(b.Cfg.Static.StopCommand) == 0 {
+		return ""
+	}
+	host := strings.TrimSpace(lease.Server.PublicNet.IPv4.IP)
+	if host == "" {
+		host = strings.TrimSpace(lease.SSH.Host)
+	}
+	configured := strings.TrimSpace(b.Cfg.Static.Host)
+	if host == "" || host != configured {
+		fmt.Fprintf(b.RT.Stderr, "warning: skipped static.stopCommand: lease=%s host=%q does not match static.host=%q\n", lease.LeaseID, host, configured)
+		return ""
+	}
+	return host
 }
 
 func (b *staticLeaseBackend) PreservesSSHWorkspaceAfterRelease() bool { return true }

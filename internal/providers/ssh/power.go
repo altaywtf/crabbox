@@ -1,0 +1,119 @@
+package ssh
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
+)
+
+const (
+	staticPowerCommandTimeout = 5 * time.Minute
+	staticPowerCommandGrace   = 5 * time.Second
+	staticPowerStderrTailSize = 4 << 10
+)
+
+func staticPowerConfigured(cfg core.Config) bool {
+	return len(cfg.Static.StartCommand) > 0 || len(cfg.Static.StopCommand) > 0
+}
+
+// lockStaticHostPower serializes start, claim publication, release, and stop
+// for one static host so a stop never races a concurrent acquisition.
+func lockStaticHostPower(ctx context.Context, host string) (func(), error) {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(host)))
+	name := "static-host-" + hex.EncodeToString(sum[:8]) + "." + staticProvider + "-power.lock"
+	return shared.LockOperation(ctx, staticProvider, name, "static host "+host)
+}
+
+func (b *staticLeaseBackend) runStaticPowerCommand(ctx context.Context, field string, argv []string, leaseID, host string) error {
+	if b.RT.Exec == nil {
+		return core.Exit(2, "%s cannot run: local command runner unavailable", field)
+	}
+	ctx, cancel := context.WithTimeout(ctx, staticPowerCommandTimeout)
+	defer cancel()
+	stderrTail := &tailBuffer{limit: staticPowerStderrTailSize}
+	result, err := b.RT.Exec.Run(ctx, core.LocalCommandRequest{
+		Name:                 argv[0],
+		Args:                 argv[1:],
+		Env:                  append(os.Environ(), "CRABBOX_LEASE_ID="+leaseID, "CRABBOX_STATIC_HOST="+host),
+		Stdout:               b.RT.Stderr,
+		Stderr:               io.MultiWriter(b.RT.Stderr, stderrTail),
+		DisableOutputCapture: true,
+		CancelGracePeriod:    staticPowerCommandGrace,
+	})
+	if err == nil && result.ExitCode == 0 {
+		return nil
+	}
+	if err == nil {
+		err = fmt.Errorf("exit status %d", result.ExitCode)
+	}
+	if ctx.Err() != nil {
+		err = fmt.Errorf("%w (timeout %s)", err, staticPowerCommandTimeout)
+	}
+	code := result.ExitCode
+	if code < 0 {
+		code = 1
+	}
+	return shared.LocalCommandError(field, core.LocalCommandResult{ExitCode: code, Stderr: stderrTail.String()}, err)
+}
+
+func (b *staticLeaseBackend) startStaticHost(ctx context.Context, leaseID, host string) error {
+	if len(b.Cfg.Static.StartCommand) == 0 {
+		return nil
+	}
+	fmt.Fprintf(b.RT.Stderr, "starting static host=%s lease=%s\n", host, leaseID)
+	return b.runStaticPowerCommand(ctx, "static.startCommand", b.Cfg.Static.StartCommand, leaseID, host)
+}
+
+// stopStaticHostIfUnused requires the host power lock and warns instead of
+// failing because release has already retired the lease.
+func (b *staticLeaseBackend) stopStaticHostIfUnused(ctx context.Context, leaseID, host string) {
+	if len(b.Cfg.Static.StopCommand) == 0 {
+		return
+	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		fmt.Fprintf(b.RT.Stderr, "warning: skipped static.stopCommand host=%s: list local claims: %v\n", host, err)
+		return
+	}
+	for _, claim := range claims {
+		if claim.LeaseID != leaseID && claim.Provider == staticProvider && strings.TrimSpace(claim.StaticHost) == host {
+			fmt.Fprintf(b.RT.Stderr, "static host=%s still claimed by lease=%s; skipped static.stopCommand\n", host, claim.LeaseID)
+			return
+		}
+	}
+	fmt.Fprintf(b.RT.Stderr, "stopping static host=%s lease=%s\n", host, leaseID)
+	if err := b.runStaticPowerCommand(ctx, "static.stopCommand", b.Cfg.Static.StopCommand, leaseID, host); err != nil {
+		fmt.Fprintf(b.RT.Stderr, "warning: %v\n", err)
+	}
+}
+
+type tailBuffer struct {
+	mu    sync.Mutex
+	limit int
+	data  []byte
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.data = append(t.data, p...)
+	if extra := len(t.data) - t.limit; extra > 0 {
+		t.data = append(t.data[:0], t.data[extra:]...)
+	}
+	return len(p), nil
+}
+
+func (t *tailBuffer) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return string(t.data)
+}
