@@ -104,12 +104,15 @@ environment adds `CRABBOX_LEASE_ID` and `CRABBOX_STATIC_HOST`.
   command's exit code and the last 4 KiB of its stderr. If acquisition fails
   after a successful start and no other local claim holds the host,
   `stopCommand` runs once.
-- `stopCommand` runs after a lease is released, only when no other local claim
-  on this machine holds the same `static.host`. Parallel leases on one host
+- `stopCommand` runs only when a release retires that lease's own live claim
+  on the host, and no other local claim on this machine holds the same
+  `static.host`. Releasing a lease that has no claim, or releasing it twice,
+  never stops the host. Parallel leases on one host
   (distinct `static.id` values) therefore stop it once, after the last
   release. A failure warns and does not fail the release.
-- Acquisition, claim publication, release, and stop are serialized per host, so
-  a release never stops a host another acquisition is starting.
+- Every static acquisition, with or without these commands, holds a per-host
+  lock through claim publication, and release holds it through the stop. A
+  release never stops a host that another local acquisition is bringing up.
 - `stopCommand` uses the configuration loaded by the releasing command. A lease
   released with configuration whose `static.host` differs from the lease's host
   skips the stop with a warning. Kept leases stop only when released with

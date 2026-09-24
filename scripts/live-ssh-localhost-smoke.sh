@@ -384,7 +384,47 @@ fi
 
 run_capture "$bin stop --provider ssh $slug" "$bin" stop --provider ssh "$slug" >/dev/null
 cleanup_armed=0
+
+# Static start/stop commands: repository config is refused before any command
+# runs, approved commands bracket one lease, and a repeated stop is inert.
+power_log="$work_dir/power.log"
+power_command="$work_dir/host-power"
+power_id="static_power_smoke"
+cat >"$power_command" <<'SH'
+#!/bin/sh
+printf '%s %s %s\n' "$1" "$CRABBOX_LEASE_ID" "$CRABBOX_STATIC_HOST" >>"$CRABBOX_POWER_LOG"
+SH
+chmod 0755 "$power_command"
+export CRABBOX_POWER_LOG="$power_log"
+power_argv() {
+  printf '["%s","%s"]' "$power_command" "$1"
+}
+printf 'static:\n  startCommand: %s\n' "$(power_argv up)" >"$failure_project/power-repo.yaml"
+rejection_status=0
+CRABBOX_CONFIG="$failure_project/power-repo.yaml" CRABBOX_STATIC_ID="$power_id" \
+  "$bin" warmup --provider ssh --slug "$slug-power" --keep \
+  >"$work_dir/power-reject-stdout" 2>"$work_dir/power-reject-stderr" || rejection_status=$?
+rm -f "$failure_project/power-repo.yaml"
+if [ "$rejection_status" -eq 0 ] || ! grep -q 'repository-configured static.startCommand' "$work_dir/power-reject-stderr" || [ -e "$power_log" ]; then
+  classify_validation_failure "$bin warmup with repository static.startCommand" 1 "expected refusal before any command ran: status=$rejection_status stderr=$(cat "$work_dir/power-reject-stderr")"
+  exit 1
+fi
+(
+  export CRABBOX_STATIC_ID="$power_id"
+  export CRABBOX_STATIC_START_COMMAND="$(power_argv up)"
+  export CRABBOX_STATIC_STOP_COMMAND="$(power_argv down)"
+  run_capture "$bin warmup with static power commands" "$bin" warmup --provider ssh --slug "$slug-power" --keep >/dev/null
+  run_capture "$bin stop with static power commands" "$bin" stop --provider ssh "$power_id" >/dev/null
+  "$bin" stop --provider ssh "$power_id" >/dev/null 2>&1 || true
+)
+expected_power="up $power_id 127.0.0.1
+down $power_id 127.0.0.1"
+if [ "$(cat "$power_log" 2>/dev/null)" != "$expected_power" ]; then
+  classify_validation_failure "static power command lifecycle" 1 "power log mismatch: $(cat "$power_log" 2>/dev/null)"
+  exit 1
+fi
+printf 'static_power=passed repository_command=refused start=1 stop=1 repeated_stop=inert\n'
 cleanup
 trap - EXIT
 test ! -e "$work_dir"
-printf 'classification=live_ssh_localhost_smoke_passed slug=%s host=127.0.0.1 cp=roundtrip tunnel=%s cleanup=complete\n' "$slug" "$tunnel_result"
+printf 'classification=live_ssh_localhost_smoke_passed slug=%s host=127.0.0.1 cp=roundtrip tunnel=%s static_power=passed cleanup=complete\n' "$slug" "$tunnel_result"

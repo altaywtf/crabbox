@@ -165,8 +165,30 @@ func TestStaticStopCommandRunsOnceAfterLastParallelRelease(t *testing.T) {
 	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: second}); err != nil {
 		t.Fatal(err)
 	}
-	if got := len(runner.callsFor("down")); got != 2 {
-		t.Fatalf("repeated release of an unclaimed host stops=%d want 2", got)
+	if got := len(runner.callsFor("down")); got != 1 {
+		t.Fatalf("repeated release without a live claim stops=%d want 1", got)
+	}
+}
+
+func TestStaticReleaseWithoutClaimDoesNotStop(t *testing.T) {
+	cfg, runner := staticPowerFixture(t, nil)
+	cfg.Static.ID = "static_power_unclaimed"
+	server, target, leaseID, err := core.StaticLease(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+
+	err = newStaticPowerBackend(cfg, runner, &stderr).ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stops := runner.callsFor("down"); len(stops) != 0 {
+		t.Fatalf("unclaimed release stopped the host: %#v", stops)
+	}
+	if !strings.Contains(stderr.String(), "holds no claim on this host") {
+		t.Fatalf("stderr=%q", stderr.String())
 	}
 }
 
@@ -307,5 +329,46 @@ func TestStaticPowerCommandCancellationIsNotTimeout(t *testing.T) {
 
 	if err == nil || strings.Contains(err.Error(), "timeout") || core.ExitCodeForError(err, 0) != 1 {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestStaticReleaseWaitsForAcquireWithoutPowerCommands(t *testing.T) {
+	cfg, runner := staticPowerFixture(t, nil)
+	first := acquireStaticPowerLease(t, cfg, runner, "static_power_hooked")
+	waiting := make(chan struct{})
+	proceed := make(chan struct{})
+	waitForSSH = func(context.Context, *core.SSHTarget, io.Writer) error {
+		close(waiting)
+		<-proceed
+		return nil
+	}
+	plain := cfg
+	plain.Static.ID = "static_power_plain"
+	plain.Static.StartCommand = nil
+	plain.Static.StopCommand = nil
+	acquired := make(chan error, 1)
+	go func() {
+		_, err := newStaticPowerBackend(plain, runner, io.Discard).Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
+		acquired <- err
+	}()
+	<-waiting
+	released := make(chan error, 1)
+	go func() {
+		released <- newStaticPowerBackend(cfg, runner, io.Discard).ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: first})
+	}()
+	select {
+	case err := <-released:
+		t.Fatalf("release finished while an acquisition without power commands held the host: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(proceed)
+	if err := <-acquired; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-released; err != nil {
+		t.Fatal(err)
+	}
+	if stops := runner.callsFor("down"); len(stops) != 0 {
+		t.Fatalf("stop raced an acquisition without power commands: %#v", stops)
 	}
 }

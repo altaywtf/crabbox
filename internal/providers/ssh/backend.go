@@ -28,9 +28,11 @@ func NewStaticSSHLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.R
 
 func (b *staticLeaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	host := strings.TrimSpace(b.Cfg.Static.Host)
-	if !staticPowerConfigured(b.Cfg) || host == "" {
+	if host == "" {
 		return b.acquire(ctx, req, "")
 	}
+	// Every acquisition takes the host lock, with or without power commands,
+	// so a stop decided under the lock cannot miss a claim being published.
 	unlock, err := lockStaticHostPower(ctx, host)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -39,8 +41,8 @@ func (b *staticLeaseBackend) Acquire(ctx context.Context, req core.AcquireReques
 	return b.acquire(ctx, req, host)
 }
 
-// acquire runs static.startCommand when powerHost is set; the caller holds
-// that host's power lock through claim publication.
+// acquire runs static.startCommand when configured and powerHost is set; the
+// caller holds that host's power lock through claim publication.
 func (b *staticLeaseBackend) acquire(ctx context.Context, req core.AcquireRequest, powerHost string) (_ core.LeaseTarget, err error) {
 	cfg := b.Cfg
 	if req.RequestedSlug != "" {
@@ -282,12 +284,31 @@ func (b *staticLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseL
 			defer unlock()
 		}
 	}
+	retired := powerHost != "" && b.retireStaticPowerClaim(req.Lease.LeaseID, powerHost)
 	core.RemoveLeaseClaim(req.Lease.LeaseID)
 	b.clearAcquiredLease(req.Lease.LeaseID)
-	if powerHost != "" {
+	if retired {
 		b.stopStaticHostIfUnused(ctx, req.Lease.LeaseID, powerHost)
 	}
 	return nil
+}
+
+// retireStaticPowerClaim authorizes static.stopCommand only by removing this
+// lease's exact live claim for host; a repeated or unclaimed release never stops.
+func (b *staticLeaseBackend) retireStaticPowerClaim(leaseID, host string) bool {
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err == nil && exists && claim.Provider == staticProvider && strings.TrimSpace(claim.StaticHost) == host {
+		err = core.RemoveLeaseClaimIfUnchanged(leaseID, claim)
+		if err == nil {
+			return true
+		}
+	}
+	if err != nil {
+		fmt.Fprintf(b.RT.Stderr, "warning: skipped static.stopCommand host=%s lease=%s: %v\n", host, leaseID, err)
+	} else {
+		fmt.Fprintf(b.RT.Stderr, "skipped static.stopCommand host=%s: lease=%s holds no claim on this host\n", host, leaseID)
+	}
+	return false
 }
 
 // staticReleasePowerHost returns the host whose stop command applies to the
