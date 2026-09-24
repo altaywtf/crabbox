@@ -346,6 +346,7 @@ jobs:
             'TestWSLStageRootPreparationSecuresInheritedWindowsACL',
             'TestWSLStageRootPreparationRejectsFilesAndReparsePoints',
             'TestWSLStageRootPreparationCapabilityGrants',
+            'TestWSLStageRootPreparationRejectsCapabilityGrantsOnStagePaths',
             'TestWSLStageShellDiscoveryWithoutWMI',
             'TestWSLStageFrameworkInputPreamble',
             'TestWSLStageDelayedInitialHandoff',

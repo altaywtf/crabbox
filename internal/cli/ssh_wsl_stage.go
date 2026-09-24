@@ -715,9 +715,9 @@ func wslStageRootPreparationCommand(proofs ...string) string {
 try {
 `+wslStageShellDiscoveryScript+`  $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
   $allowed = @($sid.Value, "S-1-5-18", "S-1-5-32-544" | Select-Object -Unique)
-  # Capability SIDs (Windows 11 profiles grant one traverse) may hold only read, execute, and synchronize rights.
+  # HOME only: Windows 11 profiles grant a capability SID traverse; it may hold only read, execute, and synchronize rights.
   $capabilityDenied = -bnot (0x201200A9 -bor [int]::MinValue)
-  function Test-StageDirectory($path, $protected = $false, $owners = @($sid.Value)) {
+  function Test-StageDirectory($path, $protected = $false, $owners = @($sid.Value), $capabilityRead = $false) {
     $item = Get-Item -LiteralPath $path -Force
     if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "invalid directory" }
     $actual = [IO.Directory]::GetAccessControl($path)
@@ -727,7 +727,7 @@ try {
     $rules = @($actual.GetAccessRules($true, $true, $sid.GetType()))
     foreach ($rule in $rules) {
       if ($rule.AccessControlType -eq "Allow" -and $rule.IdentityReference.Value -notin $allowed -and
-          -not ($rule.IdentityReference.Value -like "S-1-15-3-*" -and ([int]$rule.FileSystemRights -band $capabilityDenied) -eq 0)) { throw "untrusted grant" }
+          -not ($capabilityRead -and $rule.IdentityReference.Value -like "S-1-15-3-*" -and ([int]$rule.FileSystemRights -band $capabilityDenied) -eq 0)) { throw "untrusted grant" }
     }
     if ($protected) {
       if (-not $actual.AreAccessRulesProtected -or -not $actual.AreAccessRulesCanonical -or $rules.Count -ne $allowed.Count) { throw "invalid DACL" }
@@ -741,7 +741,7 @@ try {
   }
   $parent = Join-Path $HOME ".crabbox"
   $root = Join-Path $parent "wsl-stage"
-  Test-StageDirectory $HOME $false $allowed
+  Test-StageDirectory $HOME $false $allowed $true
   foreach ($path in @($parent, $root)) {
     if (Test-Path -LiteralPath $path) { Test-StageDirectory $path }
   }

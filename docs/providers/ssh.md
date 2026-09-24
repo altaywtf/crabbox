@@ -456,8 +456,9 @@ workspace-owner protocol's separate direct-child ownership contract.
 WSL2 staging requires a private Windows HOME owned by the SSH user, SYSTEM, or
 Builtin Administrators. The `.crabbox` parent and `wsl-stage` directory must be
 owned by the SSH user. Access may be granted only to that user, SYSTEM, and
-Builtin Administrators, plus app-capability SIDs (`S-1-15-3-*`) limited to
-read, execute, and synchronize rights; Crabbox does not change HOME ownership or ACLs. Crabbox
+Builtin Administrators. HOME may also grant app-capability SIDs (`S-1-15-3-*`)
+limited to read, execute, and synchronize rights; the staging directories may not.
+Crabbox does not change HOME ownership or ACLs. Crabbox
 rejects files, reparse points, and existing unsafe ACLs before changing
 permissions or writing a route proof or payload.
 Both safe inherited staging directories are normalized to an explicit SSH-user

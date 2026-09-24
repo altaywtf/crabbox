@@ -866,6 +866,37 @@ func TestWSLStageRootPreparationCapabilityGrants(t *testing.T) {
 	}
 }
 
+func TestWSLStageRootPreparationRejectsCapabilityGrantsOnStagePaths(t *testing.T) {
+	for _, stage := range []string{".crabbox", "wsl-stage"} {
+		t.Run(stage, func(t *testing.T) {
+			home := newWindowsStageTestHome(t)
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			parent := filepath.Join(home, ".crabbox")
+			root := filepath.Join(parent, "wsl-stage")
+			createWindowsStageTestDirectory(t, parent)
+			createWindowsStageTestDirectory(t, root)
+			target := parent
+			if stage == "wsl-stage" {
+				target = root
+			}
+			addWindowsStageTestACE(t, target, "(A;;0x100020;;;S-1-15-3-1)")
+			parentBefore, rootBefore := windowsStageSecuritySnapshot(t, parent), windowsStageSecuritySnapshot(t, root)
+			nonce := strings.Repeat("d", 32)
+			output, err := runWSLStageRootScript(t, decodePowerShellCommand(t, wslStageRootPreparationCommand(nonce)))
+			if err == nil || !bytes.Contains(output, []byte("WSL2 private stage preparation failed")) {
+				t.Fatalf("preparation accepted a capability grant on %s: output=%q err=%v", stage, output, err)
+			}
+			if windowsStageSecuritySnapshot(t, parent) != parentBefore || windowsStageSecuritySnapshot(t, root) != rootBefore {
+				t.Fatal("rejected preparation changed a stage ACL")
+			}
+			if _, err := os.Lstat(filepath.Join(root, "."+nonce+".proof")); !os.IsNotExist(err) {
+				t.Fatalf("rejected preparation wrote a route proof: %v", err)
+			}
+		})
+	}
+}
+
 func addWindowsStageTestACE(t *testing.T, path, ace string) {
 	t.Helper()
 	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
