@@ -78,7 +78,7 @@ switch (tool) {
       process.exit(options.acceptRepositoryPower ? 0 : 2);
     }
     if (process.env.CRABBOX_STATIC_START_COMMAND && JSON.parse(process.env.CRABBOX_STATIC_START_COMMAND)[0].startsWith("./") && !options.acceptRelativePower) {
-      process.stderr.write("CRABBOX_STATIC_START_COMMAND executable must be an absolute path or a command name on PATH\\n");
+      process.stderr.write("CRABBOX_STATIC_START_COMMAND executable must be an absolute path\\n");
       process.exit(2);
     }
     if (command === "warmup" && process.env.CRABBOX_STATIC_START_COMMAND) {

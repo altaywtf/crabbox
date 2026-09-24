@@ -477,3 +477,24 @@ func TestStaticStopSkipsOlderAcquisitionOnSameBackend(t *testing.T) {
 		t.Fatalf("newer release stops=%#v want 1", stops)
 	}
 }
+
+func TestStaticUnobservedReleaseKeepsConcurrentClaim(t *testing.T) {
+	cfg, runner := staticPowerFixture(t, nil)
+	cfg.Static.ID = "static_power_unobserved"
+	server, target, leaseID, err := core.StaticLease(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unobserved := core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
+	acquireStaticPowerLease(t, cfg, runner, leaseID)
+
+	if err := newStaticPowerBackend(cfg, runner, io.Discard).ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: unobserved}); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || !exists {
+		t.Fatalf("unobserved release removed a concurrent claim exists=%t err=%v", exists, err)
+	}
+	if stops := runner.callsFor("down"); len(stops) != 0 {
+		t.Fatalf("unobserved release stopped the host: %#v", stops)
+	}
+}

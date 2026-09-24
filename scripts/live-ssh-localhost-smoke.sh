@@ -416,7 +416,7 @@ CRABBOX_STATIC_ID="$power_id" CRABBOX_STATIC_START_COMMAND='["./host-power","up"
   "$bin" warmup --provider ssh --slug "$power_slug" --keep \
   >"$work_dir/power-relative-stdout" 2>"$work_dir/power-relative-stderr" || relative_status=$?
 rm -f "$failure_project/host-power"
-if [ "$relative_status" -eq 0 ] || ! grep -q 'must be an absolute path or a command name on PATH' "$work_dir/power-relative-stderr" || [ -e "$power_log" ]; then
+if [ "$relative_status" -eq 0 ] || ! grep -q 'must be an absolute path' "$work_dir/power-relative-stderr" || [ -e "$power_log" ]; then
   classify_validation_failure "$bin warmup with relative static.startCommand" 1 "expected refusal before any command ran: status=$relative_status stderr=$(cat "$work_dir/power-relative-stderr")"
   exit 1
 fi

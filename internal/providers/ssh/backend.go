@@ -282,27 +282,23 @@ func (b *staticLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseL
 	if powerHost != "" {
 		unlock, err := lockStaticHostPower(ctx, powerHost)
 		if err != nil {
-			fmt.Fprintf(b.RT.Stderr, "warning: skipped static.stopCommand host=%s: %v\n", powerHost, err)
-			powerHost = ""
-		} else {
-			defer unlock()
+			return fmt.Errorf("lock static host %s for release: %w", powerHost, err)
 		}
+		defer unlock()
 	}
-	outcome := staticClaimUnobserved
-	if powerHost != "" {
-		outcome = b.retireStaticPowerClaim(req.Lease, powerHost)
+	if powerHost == "" {
+		core.RemoveLeaseClaim(req.Lease.LeaseID)
+		b.clearAcquiredLease(req.Lease.LeaseID)
+		return nil
 	}
-	switch outcome {
+	switch b.retireStaticPowerClaim(req.Lease, powerHost) {
 	case staticClaimRetired:
 		b.clearAcquiredLease(req.Lease.LeaseID)
 		b.stopStaticHostIfUnused(ctx, req.Lease.LeaseID, powerHost)
-	case staticClaimSuperseded:
-		// Another acquisition or process owns the current claim; its release
-		// retires the claim and decides the stop.
+	case staticClaimSuperseded, staticClaimUnobserved:
+		// Without an observed claim this release cannot prove the current claim
+		// is its own; the owning release retires it and decides the stop.
 		b.clearAcquisition(req.Lease)
-	default:
-		core.RemoveLeaseClaim(req.Lease.LeaseID)
-		b.clearAcquiredLease(req.Lease.LeaseID)
 	}
 	return nil
 }

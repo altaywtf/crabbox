@@ -99,13 +99,13 @@ func TestStaticCommandsFromTrustedUserConfig(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
 	cfg.Provider = staticProvider
-	if err := applyFileConfigWithTrust(&cfg, staticCommandFile([]string{"host-power", "up"}, []string{"host-power", "down"}), true); err != nil {
+	if err := applyFileConfigWithTrust(&cfg, staticCommandFile([]string{"/opt/tools/host-power", "up"}, []string{"/opt/tools/host-power", "down"}), true); err != nil {
 		t.Fatal(err)
 	}
 	if err := validateProviderCredentialDestination(cfg); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(cfg.Static.StartCommand, []string{"host-power", "up"}) || !reflect.DeepEqual(cfg.Static.StopCommand, []string{"host-power", "down"}) {
+	if !reflect.DeepEqual(cfg.Static.StartCommand, []string{"/opt/tools/host-power", "up"}) || !reflect.DeepEqual(cfg.Static.StopCommand, []string{"/opt/tools/host-power", "down"}) {
 		t.Fatalf("commands=%q/%q", cfg.Static.StartCommand, cfg.Static.StopCommand)
 	}
 }
@@ -119,9 +119,10 @@ func TestStaticCommandInputValidation(t *testing.T) {
 	}{
 		{"not JSON", "CRABBOX_STATIC_START_COMMAND", "./host-power up", "must be a JSON argv array"},
 		{"blank executable", "CRABBOX_STATIC_STOP_COMMAND", `[" ","down"]`, "must start with an executable"},
-		{"NUL byte", "CRABBOX_STATIC_START_COMMAND", `["host-power","u\u0000p"]`, "contains a NUL byte"},
-		{"dot-relative executable", "CRABBOX_STATIC_START_COMMAND", `["./host-power","up"]`, "executable \"./host-power\" must be an absolute path or a command name on PATH"},
-		{"nested relative executable", "CRABBOX_STATIC_STOP_COMMAND", `["scripts/host-power","down"]`, "executable \"scripts/host-power\" must be an absolute path or a command name on PATH"},
+		{"NUL byte", "CRABBOX_STATIC_START_COMMAND", `["/opt/tools/host-power","u\u0000p"]`, "contains a NUL byte"},
+		{"dot-relative executable", "CRABBOX_STATIC_START_COMMAND", `["./host-power","up"]`, "executable \"./host-power\" must be an absolute path"},
+		{"nested relative executable", "CRABBOX_STATIC_STOP_COMMAND", `["scripts/host-power","down"]`, "executable \"scripts/host-power\" must be an absolute path"},
+		{"PATH command name", "CRABBOX_STATIC_START_COMMAND", `["host-power","up"]`, "executable \"host-power\" must be an absolute path"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clearConfigEnv(t)
@@ -144,7 +145,7 @@ func TestStaticCommandRelativeExecutableRefusedFromEverySource(t *testing.T) {
 	for _, trusted := range []bool{true, false} {
 		cfg := baseConfig()
 		err := applyFileConfigWithTrust(&cfg, staticCommandFile([]string{"./host-power", "up"}, nil), trusted)
-		if err == nil || !strings.Contains(err.Error(), "must be an absolute path or a command name on PATH") {
+		if err == nil || !strings.Contains(err.Error(), "must be an absolute path") {
 			t.Fatalf("trusted=%t err=%v", trusted, err)
 		}
 	}
@@ -154,7 +155,7 @@ func TestStaticCommandRelativeExecutableRefusedFromEverySource(t *testing.T) {
 	if err := fs.Parse([]string{`--static-stop-command=["../host-power","down"]`}); err != nil {
 		t.Fatal(err)
 	}
-	if err := applyTargetFlagOverrides(&cfg, fs, values); err == nil || !strings.Contains(err.Error(), "must be an absolute path or a command name on PATH") {
+	if err := applyTargetFlagOverrides(&cfg, fs, values); err == nil || !strings.Contains(err.Error(), "must be an absolute path") {
 		t.Fatalf("flag err=%v", err)
 	}
 }

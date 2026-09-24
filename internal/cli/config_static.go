@@ -169,10 +169,10 @@ func validateStaticCommand(name string, argv []string) ([]string, error) {
 	if strings.TrimSpace(argv[0]) == "" {
 		return nil, Exit(2, "%s must start with an executable", name)
 	}
-	// A relative executable resolves against the working directory, which a
-	// repository controls; approval must name an operator-controlled file.
-	if !filepath.IsAbs(argv[0]) && strings.ContainsAny(argv[0], `/\`) {
-		return nil, Exit(2, "%s executable %q must be an absolute path or a command name on PATH", name, argv[0])
+	// Relative paths and PATH lookups can resolve into a repository-controlled
+	// directory; approval must name one operator-controlled file.
+	if !filepath.IsAbs(argv[0]) {
+		return nil, Exit(2, "%s executable %q must be an absolute path", name, argv[0])
 	}
 	for _, arg := range argv {
 		if strings.ContainsRune(arg, 0) {
