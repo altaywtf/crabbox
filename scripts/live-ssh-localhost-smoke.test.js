@@ -79,7 +79,18 @@ switch (tool) {
     }
     if (command === "warmup" && process.env.CRABBOX_STATIC_START_COMMAND) {
       power("start", process.env.CRABBOX_STATIC_START_COMMAND);
-      fs.writeFileSync(powerClaim, "");
+      fs.writeFileSync(powerClaim, crypto.randomUUID());
+    }
+    if (command === "run" && !args.includes("--id") && process.env.CRABBOX_STATIC_START_COMMAND) {
+      power("start", process.env.CRABBOX_STATIC_START_COMMAND);
+      const revision = crypto.randomUUID();
+      fs.writeFileSync(powerClaim, revision);
+      const workload = spawnSync(args[args.indexOf("--") + 1], args.slice(args.indexOf("--") + 2), { stdio: "inherit" });
+      const current = fs.existsSync(powerClaim) ? fs.readFileSync(powerClaim, "utf8") : "";
+      fs.rmSync(powerClaim, { force: true });
+      if (current === revision || options.staleStop) power("stop", process.env.CRABBOX_STATIC_STOP_COMMAND);
+      else process.stderr.write("skipped static.stopCommand host=127.0.0.1: lease claim is absent or changed since this command observed it\\n");
+      process.exit(workload.status ?? 99);
     }
     if (command === "stop" && process.env.CRABBOX_STATIC_STOP_COMMAND && (fs.existsSync(powerClaim) || options.repeatPowerStop)) {
       fs.rmSync(powerClaim, { force: true });
@@ -213,7 +224,7 @@ test("SSH localhost smoke accepts list JSON with diagnostics kept on stderr", (t
   const result = runSmoke(t, { listStderr: diagnostic + "\n" });
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /classification=live_ssh_localhost_smoke_passed .*cp=roundtrip tunnel=ready static_power=passed cleanup=complete/);
-  assert.match(result.stdout, /static_power=passed repository_command=refused start=1 stop=1 repeated_stop=inert/);
+  assert.match(result.stdout, /static_power=passed repository_command=refused start=1 stop=1 repeated_stop=inert stale_claim_stop=skipped/);
   assert.ok(result.stderr.includes(diagnostic + "\n"));
   assert.match(result.stdout, /failure_bundle=passed exit=23 .*stale=absent neighbors=absent .*explicit_download=passed retained=true remote_archives=0/);
   assert.doesNotMatch(result.stderr, /classification=environment_blocked/);
@@ -221,10 +232,10 @@ test("SSH localhost smoke accepts list JSON with diagnostics kept on stderr", (t
   const payload = JSON.parse(result.stdout.split("\n").find(line => line.startsWith("[")));
   const slug = result.calls.find(args => args[0] === "warmup")[4];
   assert.equal(payload[0].labels.slug, slug);
-  assert.deepEqual(result.calls.map(args => args[0]), ["doctor", "warmup", "status", "run", "run", "run", "status", "cp", "cp", "tunnel", "list", "stop", "warmup", "warmup", "stop", "stop"]);
+  assert.deepEqual(result.calls.map(args => args[0]), ["doctor", "warmup", "status", "run", "run", "run", "status", "cp", "cp", "tunnel", "list", "stop", "warmup", "warmup", "stop", "stop", "run", "warmup"]);
 });
 
-for (const options of [{ acceptRepositoryPower: true }, { repeatPowerStop: true }]) {
+for (const options of [{ acceptRepositoryPower: true }, { repeatPowerStop: true }, { staleStop: true }]) {
   test(`SSH localhost static power phase rejects ${JSON.stringify(options)}`, (t) => {
     const result = runSmoke(t, options);
     assert.equal(result.status, 1, result.stdout + result.stderr);

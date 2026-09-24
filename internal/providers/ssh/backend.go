@@ -284,7 +284,7 @@ func (b *staticLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseL
 			defer unlock()
 		}
 	}
-	retired := powerHost != "" && b.retireStaticPowerClaim(req.Lease.LeaseID, powerHost)
+	retired := powerHost != "" && b.retireStaticPowerClaim(req.Lease, powerHost)
 	core.RemoveLeaseClaim(req.Lease.LeaseID)
 	b.clearAcquiredLease(req.Lease.LeaseID)
 	if retired {
@@ -293,21 +293,28 @@ func (b *staticLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseL
 	return nil
 }
 
-// retireStaticPowerClaim authorizes static.stopCommand only by removing this
-// lease's exact live claim for host; a repeated or unclaimed release never stops.
-func (b *staticLeaseBackend) retireStaticPowerClaim(leaseID, host string) bool {
-	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
-	if err == nil && exists && claim.Provider == staticProvider && strings.TrimSpace(claim.StaticHost) == host {
-		err = core.RemoveLeaseClaimIfUnchanged(leaseID, claim)
-		if err == nil {
+// retireStaticPowerClaim authorizes static.stopCommand only by removing the
+// exact claim this process last observed for the releasing lease. A claim
+// another process republished or touched, or no claim at all, never stops.
+func (b *staticLeaseBackend) retireStaticPowerClaim(lease core.LeaseTarget, host string) bool {
+	var observed []core.LeaseClaim
+	if cached, ok := b.acquiredLeaseForID(lease.LeaseID); ok {
+		if claim, exists, set := core.ServerLeaseClaimSnapshot(cached.Server); set && exists {
+			observed = append(observed, claim)
+		}
+	}
+	if claim, exists, set := core.ServerLeaseClaimSnapshot(lease.Server); set && exists {
+		observed = append(observed, claim)
+	}
+	for _, claim := range observed {
+		if claim.LeaseID != lease.LeaseID || claim.Provider != staticProvider || strings.TrimSpace(claim.StaticHost) != host {
+			continue
+		}
+		if err := core.RemoveLeaseClaimIfUnchanged(lease.LeaseID, claim); err == nil {
 			return true
 		}
 	}
-	if err != nil {
-		fmt.Fprintf(b.RT.Stderr, "warning: skipped static.stopCommand host=%s lease=%s: %v\n", host, leaseID, err)
-	} else {
-		fmt.Fprintf(b.RT.Stderr, "skipped static.stopCommand host=%s: lease=%s holds no claim on this host\n", host, leaseID)
-	}
+	fmt.Fprintf(b.RT.Stderr, "skipped static.stopCommand host=%s: lease=%s claim is absent or changed since this command observed it\n", host, lease.LeaseID)
 	return false
 }
 

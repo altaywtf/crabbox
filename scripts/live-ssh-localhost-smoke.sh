@@ -424,7 +424,45 @@ if [ "$(cat "$power_log" 2>/dev/null)" != "$expected_power" ]; then
   classify_validation_failure "static power command lifecycle" 1 "power log mismatch: $(cat "$power_log" 2>/dev/null)"
   exit 1
 fi
-printf 'static_power=passed repository_command=refused start=1 stop=1 repeated_stop=inert\n'
+# A run whose claim another process reacquires mid-run must not stop the host.
+: >"$power_log"
+held_marker="$work_dir/power-held"
+release_marker="$work_dir/power-release"
+(
+  export CRABBOX_STATIC_ID="$power_id"
+  export CRABBOX_STATIC_START_COMMAND="$(power_argv up)"
+  export CRABBOX_STATIC_STOP_COMMAND="$(power_argv down)"
+  "$bin" run --provider ssh --no-sync -- /bin/sh -c "touch '$held_marker'; i=0; while [ ! -e '$release_marker' ] && [ \$i -lt 300 ]; do sleep 0.2; i=\$((i + 1)); done" \
+    >"$work_dir/power-run-stdout" 2>"$work_dir/power-run-stderr" &
+  run_pid=$!
+  wait_attempt=0
+  while [ ! -e "$held_marker" ] && [ "$wait_attempt" -lt 300 ] && kill -0 "$run_pid" 2>/dev/null; do
+    sleep 0.2
+    wait_attempt=$((wait_attempt + 1))
+  done
+  if [ ! -e "$held_marker" ]; then
+    touch "$release_marker"
+    wait "$run_pid" || true
+    classify_validation_failure "$bin run holding a static power lease" 1 "run never held the lease: $(cat "$work_dir/power-run-stderr")"
+    exit 1
+  fi
+  reacquire_status=0
+  "$bin" warmup --provider ssh --slug "$power_slug" --keep >/dev/null 2>"$work_dir/power-reacquire-stderr" || reacquire_status=$?
+  touch "$release_marker"
+  run_status=0
+  wait "$run_pid" || run_status=$?
+  if [ "$reacquire_status" -ne 0 ] || [ "$run_status" -ne 0 ]; then
+    classify_validation_failure "static power stale-claim scenario" 1 "reacquire=$reacquire_status run=$run_status: $(cat "$work_dir/power-reacquire-stderr" "$work_dir/power-run-stderr")"
+    exit 1
+  fi
+)
+expected_stale="up $power_id 127.0.0.1
+up $power_id 127.0.0.1"
+if [ "$(cat "$power_log")" != "$expected_stale" ] || ! grep -q 'claim is absent or changed' "$work_dir/power-run-stderr"; then
+  classify_validation_failure "static power stale-claim scenario" 1 "stale release must skip stop: $(cat "$power_log") $(cat "$work_dir/power-run-stderr")"
+  exit 1
+fi
+printf 'static_power=passed repository_command=refused start=1 stop=1 repeated_stop=inert stale_claim_stop=skipped\n'
 cleanup
 trap - EXIT
 test ! -e "$work_dir"

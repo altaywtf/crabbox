@@ -187,7 +187,7 @@ func TestStaticReleaseWithoutClaimDoesNotStop(t *testing.T) {
 	if stops := runner.callsFor("down"); len(stops) != 0 {
 		t.Fatalf("unclaimed release stopped the host: %#v", stops)
 	}
-	if !strings.Contains(stderr.String(), "holds no claim on this host") {
+	if !strings.Contains(stderr.String(), "claim is absent or changed") {
 		t.Fatalf("stderr=%q", stderr.String())
 	}
 }
@@ -370,5 +370,73 @@ func TestStaticReleaseWaitsForAcquireWithoutPowerCommands(t *testing.T) {
 	}
 	if stops := runner.callsFor("down"); len(stops) != 0 {
 		t.Fatalf("stop raced an acquisition without power commands: %#v", stops)
+	}
+}
+
+func TestStaticStopSkipsClaimChangedByAnotherProcess(t *testing.T) {
+	cfg, runner := staticPowerFixture(t, nil)
+	cfg.Static.ID = "static_power_stale"
+	holder := newStaticPowerBackend(cfg, runner, io.Discard)
+	stale, err := holder.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := newStaticPowerBackend(cfg, runner, io.Discard)
+	resolved, err := other.Resolve(context.Background(), core.ResolveRequest{ID: stale.LeaseID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.Touch(context.Background(), core.TouchRequest{Lease: resolved, State: "busy"}); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	holder.RT.Stderr = &stderr
+
+	if err := holder.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: stale}); err != nil {
+		t.Fatal(err)
+	}
+	if stops := runner.callsFor("down"); len(stops) != 0 {
+		t.Fatalf("stale lease stopped a host whose claim another process changed: %#v", stops)
+	}
+	if !strings.Contains(stderr.String(), "claim is absent or changed") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestStaticStopFollowsOwnHeartbeat(t *testing.T) {
+	cfg, runner := staticPowerFixture(t, nil)
+	cfg.Static.ID = "static_power_heartbeat"
+	backend := newStaticPowerBackend(cfg, runner, io.Discard)
+	acquired, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Touch(context.Background(), core.TouchRequest{Lease: acquired, State: "running"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: acquired}); err != nil {
+		t.Fatal(err)
+	}
+	if stops := runner.callsFor("down"); len(stops) != 1 {
+		t.Fatalf("own heartbeat blocked the stop: stops=%#v", stops)
+	}
+}
+
+func TestStaticStopFromFreshResolve(t *testing.T) {
+	cfg, runner := staticPowerFixture(t, nil)
+	lease := acquireStaticPowerLease(t, cfg, runner, "static_power_resolved")
+	cfg.Static.ID = lease.LeaseID
+	stopper := newStaticPowerBackend(cfg, runner, io.Discard)
+	resolved, err := stopper.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := stopper.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: resolved}); err != nil {
+		t.Fatal(err)
+	}
+	if stops := runner.callsFor("down"); len(stops) != 1 {
+		t.Fatalf("resolved release stops=%#v want 1", stops)
 	}
 }
