@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix WSL2 static targets for non-administrator Windows accounts: shell discovery no longer needs WMI, and stage checks accept read-only app-capability grants on Windows 11 profiles ([#2546](https://github.com/openclaw/crabbox/pull/2546)). Thanks @altaywtf.
+
 ## 0.66.0 - 2026-09-24
 
 ### Highlights
