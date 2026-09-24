@@ -390,6 +390,7 @@ cleanup_armed=0
 power_log="$work_dir/power.log"
 power_command="$work_dir/host-power"
 power_id="static_power_smoke"
+power_slug="power-smoke"
 cat >"$power_command" <<'SH'
 #!/bin/sh
 printf '%s %s %s\n' "$1" "$CRABBOX_LEASE_ID" "$CRABBOX_STATIC_HOST" >>"$CRABBOX_POWER_LOG"
@@ -402,7 +403,7 @@ power_argv() {
 printf 'static:\n  startCommand: %s\n' "$(power_argv up)" >"$failure_project/power-repo.yaml"
 rejection_status=0
 CRABBOX_CONFIG="$failure_project/power-repo.yaml" CRABBOX_STATIC_ID="$power_id" \
-  "$bin" warmup --provider ssh --slug "$slug-power" --keep \
+  "$bin" warmup --provider ssh --slug "$power_slug" --keep \
   >"$work_dir/power-reject-stdout" 2>"$work_dir/power-reject-stderr" || rejection_status=$?
 rm -f "$failure_project/power-repo.yaml"
 if [ "$rejection_status" -eq 0 ] || ! grep -q 'repository-configured static.startCommand' "$work_dir/power-reject-stderr" || [ -e "$power_log" ]; then
@@ -413,7 +414,7 @@ fi
   export CRABBOX_STATIC_ID="$power_id"
   export CRABBOX_STATIC_START_COMMAND="$(power_argv up)"
   export CRABBOX_STATIC_STOP_COMMAND="$(power_argv down)"
-  run_capture "$bin warmup with static power commands" "$bin" warmup --provider ssh --slug "$slug-power" --keep >/dev/null
+  run_capture "$bin warmup with static power commands" "$bin" warmup --provider ssh --slug "$power_slug" --keep >/dev/null
   run_capture "$bin stop with static power commands" "$bin" stop --provider ssh "$power_id" >/dev/null
   "$bin" stop --provider ssh "$power_id" >/dev/null 2>&1 || true
 )

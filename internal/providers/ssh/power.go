@@ -22,10 +22,6 @@ const (
 	staticPowerStderrTailSize = 4 << 10
 )
 
-func staticPowerConfigured(cfg core.Config) bool {
-	return len(cfg.Static.StartCommand) > 0 || len(cfg.Static.StopCommand) > 0
-}
-
 // lockStaticHostPower serializes start, claim publication, release, and stop
 // for one static host so a stop never races a concurrent acquisition.
 func lockStaticHostPower(ctx context.Context, host string) (func(), error) {
