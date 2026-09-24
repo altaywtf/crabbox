@@ -95,7 +95,10 @@ static:
 ```
 
 Both are argv arrays run locally without a shell, from the current working
-directory, with a 5 minute timeout. Output streams to stderr. The child
+directory, with a 5 minute timeout. The executable must be an absolute path or
+a bare command name looked up on `PATH`; relative paths such as
+`./scripts/host-power` are refused from every config source because they
+resolve against a directory the repository controls. Output streams to stderr. The child
 environment adds `CRABBOX_LEASE_ID` and `CRABBOX_STATIC_HOST`.
 
 - `startCommand` runs during acquisition, before the SSH readiness wait,
@@ -108,7 +111,8 @@ environment adds `CRABBOX_LEASE_ID` and `CRABBOX_STATIC_HOST`.
   acquisition last published, and no other local claim on this machine holds
   the same `static.host`. Releasing a lease that has no claim, releasing it
   twice, or releasing after a later acquisition or another process
-  reacquired or heartbeated the same lease ID never stops the host. Parallel leases on one
+  reacquired or heartbeated the same lease ID never stops the host; such a
+  release also leaves the newer claim in place for its own release to retire. Parallel leases on one
   host (distinct `static.id` values) therefore stop it once, after the last
   release. A failure warns and does not fail the release.
 - Every static acquisition, with or without these commands, holds a per-host

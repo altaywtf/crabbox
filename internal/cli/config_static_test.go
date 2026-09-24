@@ -12,8 +12,8 @@ func staticCommandFile(start, stop []string) fileConfig {
 }
 
 func TestStaticCommandsRequireApprovalFromRepositoryConfig(t *testing.T) {
-	start := []string{"./host-power", "up"}
-	stop := []string{"./host-power", "down"}
+	start := []string{"/opt/tools/host-power", "up"}
+	stop := []string{"/opt/tools/host-power", "down"}
 	for _, tc := range []struct {
 		name    string
 		user    *fileConfig
@@ -33,19 +33,19 @@ func TestStaticCommandsRequireApprovalFromRepositoryConfig(t *testing.T) {
 		},
 		{
 			name:    "different trusted user command does not approve",
-			user:    &fileConfig{Static: &fileStaticSection{StartCommand: []string{"./host-power", "wake"}, StopCommand: stop}},
+			user:    &fileConfig{Static: &fileStaticSection{StartCommand: []string{"/opt/tools/host-power", "wake"}, StopCommand: stop}},
 			wantErr: "repository-configured static.startCommand",
 		},
 		{
 			name: "environment approves",
 			env: map[string]string{
-				"CRABBOX_STATIC_START_COMMAND": `["./host-power","up"]`,
-				"CRABBOX_STATIC_STOP_COMMAND":  `["./host-power","down"]`,
+				"CRABBOX_STATIC_START_COMMAND": `["/opt/tools/host-power","up"]`,
+				"CRABBOX_STATIC_STOP_COMMAND":  `["/opt/tools/host-power","down"]`,
 			},
 		},
 		{
 			name:  "flags approve",
-			flags: []string{`--static-start-command=["./host-power","up"]`, `--static-stop-command=["./host-power","down"]`},
+			flags: []string{`--static-start-command=["/opt/tools/host-power","up"]`, `--static-stop-command=["/opt/tools/host-power","down"]`},
 		},
 		{
 			name:  "empty flags clear repository commands",
@@ -120,6 +120,8 @@ func TestStaticCommandInputValidation(t *testing.T) {
 		{"not JSON", "CRABBOX_STATIC_START_COMMAND", "./host-power up", "must be a JSON argv array"},
 		{"blank executable", "CRABBOX_STATIC_STOP_COMMAND", `[" ","down"]`, "must start with an executable"},
 		{"NUL byte", "CRABBOX_STATIC_START_COMMAND", `["host-power","u\u0000p"]`, "contains a NUL byte"},
+		{"dot-relative executable", "CRABBOX_STATIC_START_COMMAND", `["./host-power","up"]`, "executable \"./host-power\" must be an absolute path or a command name on PATH"},
+		{"nested relative executable", "CRABBOX_STATIC_STOP_COMMAND", `["scripts/host-power","down"]`, "executable \"scripts/host-power\" must be an absolute path or a command name on PATH"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clearConfigEnv(t)
@@ -134,5 +136,25 @@ func TestStaticCommandInputValidation(t *testing.T) {
 	cfg := baseConfig()
 	if err := applyFileConfigWithTrust(&cfg, staticCommandFile([]string{""}, nil), true); err == nil || !strings.Contains(err.Error(), "static.startCommand must start with an executable") {
 		t.Fatalf("file blank executable err=%v", err)
+	}
+}
+
+func TestStaticCommandRelativeExecutableRefusedFromEverySource(t *testing.T) {
+	clearConfigEnv(t)
+	for _, trusted := range []bool{true, false} {
+		cfg := baseConfig()
+		err := applyFileConfigWithTrust(&cfg, staticCommandFile([]string{"./host-power", "up"}, nil), trusted)
+		if err == nil || !strings.Contains(err.Error(), "must be an absolute path or a command name on PATH") {
+			t.Fatalf("trusted=%t err=%v", trusted, err)
+		}
+	}
+	fs := newFlagSet("test", io.Discard)
+	cfg := baseConfig()
+	values := registerTargetFlags(fs, cfg)
+	if err := fs.Parse([]string{`--static-stop-command=["../host-power","down"]`}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyTargetFlagOverrides(&cfg, fs, values); err == nil || !strings.Contains(err.Error(), "must be an absolute path or a command name on PATH") {
+		t.Fatalf("flag err=%v", err)
 	}
 }

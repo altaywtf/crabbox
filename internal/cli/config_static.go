@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -122,8 +123,8 @@ type staticCommandFlagValues struct {
 
 func registerStaticCommandFlags(fs *flag.FlagSet) staticCommandFlagValues {
 	return staticCommandFlagValues{
-		Start: fs.String(staticStartCommandFlag, "", `local static host start command as a JSON argv array, e.g. ["./host-power","up"]; [] clears`),
-		Stop:  fs.String(staticStopCommandFlag, "", `local static host stop command as a JSON argv array, e.g. ["./host-power","down"]; [] clears`),
+		Start: fs.String(staticStartCommandFlag, "", `local static host start command as a JSON argv array, e.g. ["/usr/local/bin/host-power","up"]; [] clears`),
+		Stop:  fs.String(staticStopCommandFlag, "", `local static host stop command as a JSON argv array, e.g. ["/usr/local/bin/host-power","down"]; [] clears`),
 	}
 }
 
@@ -167,6 +168,11 @@ func validateStaticCommand(name string, argv []string) ([]string, error) {
 	}
 	if strings.TrimSpace(argv[0]) == "" {
 		return nil, Exit(2, "%s must start with an executable", name)
+	}
+	// A relative executable resolves against the working directory, which a
+	// repository controls; approval must name an operator-controlled file.
+	if !filepath.IsAbs(argv[0]) && strings.ContainsAny(argv[0], `/\`) {
+		return nil, Exit(2, "%s executable %q must be an absolute path or a command name on PATH", name, argv[0])
 	}
 	for _, arg := range argv {
 		if strings.ContainsRune(arg, 0) {

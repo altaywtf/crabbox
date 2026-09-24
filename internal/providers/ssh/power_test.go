@@ -398,6 +398,9 @@ func TestStaticStopSkipsClaimChangedByAnotherProcess(t *testing.T) {
 	if stops := runner.callsFor("down"); len(stops) != 0 {
 		t.Fatalf("stale lease stopped a host whose claim another process changed: %#v", stops)
 	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(stale.LeaseID); err != nil || !exists {
+		t.Fatalf("stale release removed the changed claim exists=%t err=%v", exists, err)
+	}
 	if !strings.Contains(stderr.String(), "claim is absent or changed") {
 		t.Fatalf("stderr=%q", stderr.String())
 	}
@@ -463,5 +466,14 @@ func TestStaticStopSkipsOlderAcquisitionOnSameBackend(t *testing.T) {
 	}
 	if stops := runner.callsFor("down"); len(stops) != 0 {
 		t.Fatalf("older acquisition stopped the host under a newer one: %#v", stops)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(newer.LeaseID); err != nil || !exists {
+		t.Fatalf("older release removed the newer claim exists=%t err=%v", exists, err)
+	}
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: newer}); err != nil {
+		t.Fatal(err)
+	}
+	if stops := runner.callsFor("down"); len(stops) != 1 {
+		t.Fatalf("newer release stops=%#v want 1", stops)
 	}
 }

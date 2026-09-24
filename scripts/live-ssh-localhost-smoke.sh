@@ -410,6 +410,16 @@ if [ "$rejection_status" -eq 0 ] || ! grep -q 'repository-configured static.star
   classify_validation_failure "$bin warmup with repository static.startCommand" 1 "expected refusal before any command ran: status=$rejection_status stderr=$(cat "$work_dir/power-reject-stderr")"
   exit 1
 fi
+cp "$power_command" "$failure_project/host-power"
+relative_status=0
+CRABBOX_STATIC_ID="$power_id" CRABBOX_STATIC_START_COMMAND='["./host-power","up"]' \
+  "$bin" warmup --provider ssh --slug "$power_slug" --keep \
+  >"$work_dir/power-relative-stdout" 2>"$work_dir/power-relative-stderr" || relative_status=$?
+rm -f "$failure_project/host-power"
+if [ "$relative_status" -eq 0 ] || ! grep -q 'must be an absolute path or a command name on PATH' "$work_dir/power-relative-stderr" || [ -e "$power_log" ]; then
+  classify_validation_failure "$bin warmup with relative static.startCommand" 1 "expected refusal before any command ran: status=$relative_status stderr=$(cat "$work_dir/power-relative-stderr")"
+  exit 1
+fi
 (
   export CRABBOX_STATIC_ID="$power_id"
   export CRABBOX_STATIC_START_COMMAND="$(power_argv up)"
@@ -455,14 +465,22 @@ release_marker="$work_dir/power-release"
     classify_validation_failure "static power stale-claim scenario" 1 "reacquire=$reacquire_status run=$run_status: $(cat "$work_dir/power-reacquire-stderr" "$work_dir/power-run-stderr")"
     exit 1
   fi
-)
-expected_stale="up $power_id 127.0.0.1
+  expected_stale="up $power_id 127.0.0.1
 up $power_id 127.0.0.1"
-if [ "$(cat "$power_log")" != "$expected_stale" ] || ! grep -q 'claim is absent or changed' "$work_dir/power-run-stderr"; then
-  classify_validation_failure "static power stale-claim scenario" 1 "stale release must skip stop: $(cat "$power_log") $(cat "$work_dir/power-run-stderr")"
+  if [ "$(cat "$power_log")" != "$expected_stale" ] || ! grep -q 'claim is absent or changed' "$work_dir/power-run-stderr"; then
+    classify_validation_failure "static power stale-claim scenario" 1 "stale release must skip stop: $(cat "$power_log") $(cat "$work_dir/power-run-stderr")"
+    exit 1
+  fi
+  run_capture "$bin stop of the surviving reacquired lease" "$bin" stop --provider ssh "$power_id" >/dev/null
+)
+expected_final="up $power_id 127.0.0.1
+up $power_id 127.0.0.1
+down $power_id 127.0.0.1"
+if [ "$(cat "$power_log")" != "$expected_final" ]; then
+  classify_validation_failure "static power stale-claim scenario" 1 "surviving claim must stop once: $(cat "$power_log")"
   exit 1
 fi
-printf 'static_power=passed repository_command=refused start=1 stop=1 repeated_stop=inert stale_claim_stop=skipped\n'
+printf 'static_power=passed repository_command=refused relative_executable=refused start=1 stop=1 repeated_stop=inert stale_claim_stop=skipped surviving_claim_stop=1\n'
 cleanup
 trap - EXIT
 test ! -e "$work_dir"
